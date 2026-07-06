@@ -37,6 +37,7 @@ from dotenv import load_dotenv
 
 from .cover_gen import CoverGenerator
 from .cover_upload import CoverUploader, CoverUploadError
+from .github_backup import ChapterMeta, GithubBackup, GithubBackupError
 from .hmac_client import HmacClient, HmacConfig, new_idempotency_key
 from .markdown_renderer import render as render_markdown
 from .novel_writer import ChapterDraft, LLMError, NovelWriter
@@ -73,6 +74,10 @@ class PublisherConfig:
     obsidian_admin_token: str  # 用于 cover_upload
     obsidian_admin_base_url: str  # 用于 cover_upload (e.g. 'https://shangkun.uk')
 
+    # GitHub 备份 (P3)
+    github_backup_repo: str  # e.g. 'blackclaw0318/obsidian-novel-backups'
+    github_backup_token: str  # fine-grained PAT, Contents: Read+Write on backups
+
     # 状态
     state_path: Path
     cover_tmp_dir: Path
@@ -107,6 +112,10 @@ class PublisherConfig:
             ).rstrip("/"),
             state_path=Path(os.environ.get("PUBLISH_STATE_PATH", str(DEFAULT_STATE_PATH))),
             cover_tmp_dir=Path(os.environ.get("COVER_TMP_DIR", "./data/covers")),
+            github_backup_repo=os.environ.get(
+                "GITHUB_BACKUP_REPO", "blackclaw0318/obsidian-novel-backups"
+            ),
+            github_backup_token=os.environ.get("GITHUB_BACKUP_TOKEN", ""),
         )
 
 
@@ -248,6 +257,39 @@ def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
             sig_headers=sig_headers,
         )
 
+        # 8.5 GitHub 备份 (P3) — 失败不阻塞主推送, 仅 logger.warning
+        if config.github_backup_token and config.github_backup_token.strip():
+            try:
+                backup = GithubBackup(
+                    repo=config.github_backup_repo,
+                    token=config.github_backup_token,
+                )
+                post_url = ""
+                if isinstance(resp, dict):
+                    post_url = (resp.get("post") or {}).get("url", "") or resp.get("url", "")
+                backup_meta = ChapterMeta.now(
+                    chapter_idx=idx,
+                    title=topic.title,
+                    word_count=draft.word_count,
+                    llm_usage=draft.usage or {},
+                    obsidian_post_url=post_url,
+                )
+                backup_result = backup.upload(
+                    chapter_md=rendered.content_markdown,
+                    cover_jpg=cover_path.read_bytes(),
+                    meta=backup_meta,
+                )
+                logger.info(
+                    "[%d] GitHub 备份 ✅ commit=%s files=%d",
+                    idx,
+                    backup_result.commit_sha[:12],
+                    len(backup_result.pushed_files),
+                )
+            except GithubBackupError as e:
+                logger.warning("[%d] GitHub 备份失败 (主推送仍成功): %s", idx, e)
+        else:
+            logger.info("[%d] GitHub 备份未配置 (GITHUB_BACKUP_TOKEN 缺失), 跳过", idx)
+
         # 8. 成功: 更新 state
         state.mark_pushed(idx, idem_key)
         save_state(state, config.state_path)
@@ -351,6 +393,8 @@ def cli_main(argv: list[str] | None = None) -> int:
                 obsidian_admin_base_url=config.obsidian_admin_base_url,
                 state_path=args.state,
                 cover_tmp_dir=config.cover_tmp_dir,
+                github_backup_repo=config.github_backup_repo,
+                github_backup_token=config.github_backup_token,
             )
 
         if args.dry_run:
