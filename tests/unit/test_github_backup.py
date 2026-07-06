@@ -239,10 +239,14 @@ class TestPutFileRetryBehavior:
 
     def test_network_error_treated_as_5xx(self, backup: GithubBackup, meta: ChapterMeta) -> None:
         """网络错 (ConnectionError/Timeout) 也走重试"""
-        with patch(
-            "src.github_backup.requests.put",
-            side_effect=requests.exceptions.ConnectionError("timeout"),
-        ), patch("src.github_backup.time.sleep"), pytest.raises(GithubBackupError, match="重试 3 次后仍失败"):
+        with (
+            patch(
+                "src.github_backup.requests.put",
+                side_effect=requests.exceptions.ConnectionError("timeout"),
+            ),
+            patch("src.github_backup.time.sleep"),
+            pytest.raises(GithubBackupError, match="重试 3 次后仍失败"),
+        ):
             backup._put_file("test/path.md", "content", "text/md", meta)
 
 
