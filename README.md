@@ -1,7 +1,7 @@
 # obsidian-novel-publisher
 
 > 每天 3 次自动生成中场篇科幻小说, 推送到 obsidian-journal 个人博客
-> **状态**: 🚧 开发中 v0.2 (P0 仓库骨架 + P1 LLM/选题/封面模块已落地, P2 业务编排待启动)
+> **状态**: 🚧 开发中 v0.2 (P0 + P1 + P2 已落地, P3 GitHub 备份待启动)
 
 [![Status](https://img.shields.io/badge/status-proposal-yellow)]()
 [![Python](https://img.shields.io/badge/python-3.12+-blue)]()
