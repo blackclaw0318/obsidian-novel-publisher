@@ -1,0 +1,16 @@
+【本章节信息】
+- 章节号: {chapter_idx} / {total_chapters}
+- 章节主题: {chapter_title}
+- 本章目标: {chapter_goal}
+
+【上下文快照】
+{truth_snapshot}
+
+【风格指南】
+{style_guide}
+
+【前章摘要】
+{prev_chapter_summary}
+
+【要求】
+请直接输出本章正文, ~3000 字。

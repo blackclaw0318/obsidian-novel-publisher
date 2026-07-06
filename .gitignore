@@ -17,6 +17,11 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Python venv (本地开发用, 绝不进仓)
+.venv/
+venv/
+env/
+
 # 测试 / 覆盖率
 coverage/
 .coverage

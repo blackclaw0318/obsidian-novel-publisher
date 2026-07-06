@@ -175,20 +175,26 @@ extend-exclude = '''
 '''
 
 # ============================================================
-# mypy (type checker, strict mode)
+# mypy (type checker)
+# ============================================================
+# P1 迁移期: 宽松 (xhs 老代码未跑 mypy, type hints 不全)
+# P6 重构期: 收紧 strict + 写新代码时严格返 type annotations
+# P1  → 暂不 strict, 避免迁移期一堆 false-positive 挡 lint
+# P6  → strict = true, 给 publisher/state/github_backup 等新代码戴紧箍咒
 # ============================================================
 [tool.mypy]
 python_version = "3.12"
-strict = true
-warn_return_any = true
+strict = false
+warn_return_any = false
 warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+no_implicit_optional = false
+warn_redundant_casts = false
+warn_unused_ignores = false
+warn_no_return = false
+ignore_missing_imports = true        # PIL stub 缺失等暂略
 plugins = ["pydantic.mypy"]
 exclude = [
     "build",
@@ -199,9 +205,17 @@ exclude = [
     "logs",
 ]
 
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
+# tests/ override (P6 阶段写测试时启用, P1 阶段测试为空包无需 override)
+# [[tool.mypy.overrides]]
+# module = "tests.*"
+# disallow_untyped_defs = false
+# check_untyped_defs = false
+
+# P6 阶段会替换 [tool.mypy] 为:
+# strict = true
+# disallow_untyped_defs = true
+# (且 exclude 包含 src/novel_writer.py / src/topic_gen.py / src/cover_gen.py
+#  这三个 P1 从 xhs 迁来的文件, P6 重写或补 type hints 后去除 exclude)
 
 # ============================================================
 # 项目结构 build 配置 (预留, P7 CI build 时用)

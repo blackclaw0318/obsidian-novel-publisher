@@ -1,0 +1,1 @@
+{scene_keywords}, cinematic, {color_palette}, high detail, 3:4 aspect ratio, no text, no watermark, no logo, photorealistic

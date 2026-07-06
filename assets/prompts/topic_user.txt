@@ -1,0 +1,12 @@
+【关键词组】 {keywords}
+
+【风格偏好 (可选)】 {style_guide}
+
+【候选数】 {n_candidates}
+
+请生成 {n_candidates} 个小说选题候选, 严格按 JSON 数组输出, **只输出 JSON, 不要任何额外说明文字**:
+```json
+[
+  {{"title": "题目", "outline": "大纲 300-500 字", "genre_hint": "类型"}}
+]
+```
