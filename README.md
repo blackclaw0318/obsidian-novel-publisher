@@ -1,7 +1,7 @@
 # obsidian-novel-publisher
 
 > 每天 3 次自动生成中场篇科幻小说, 推送到 obsidian-journal 个人博客
-> **状态**: ⏸️ 方案稿 v0.1, 等老板拍板启动开发
+> **状态**: 🚧 开发中 v0.2 (P0 仓库骨架已落地, P1-P7 待启动)
 
 [![Status](https://img.shields.io/badge/status-proposal-yellow)]()
 [![Python](https://img.shields.io/badge/python-3.12+-blue)]()
@@ -16,8 +16,9 @@
 "中场篇科幻小说"生成 skill 整建制搬过来, **把推送目的地从 XHS 改成老板的个人博客
 [obsidian-journal](https://github.com/blackclaw0318/obsidian-journal)**。
 
-每天 3 次（08:00 / 12:00 / 18:00）自动写一章 3000 字中篇科幻, 直接 POST 到博客 `posts` 表
-的 `category='novel'`, 老板打开网站就能看到新章节。
+每天 3 次（08:00 / 12:00 / 18:00）自动写一章 3000 字中篇科幻 + 配封面图, 通过 HMAC 鉴权
+直接 POST 到博客 `posts` 表的 `category='novel'`, 老板打开网站就能看到新章节。每章节同时
+备份到私有 GitHub 仓库 `obsidian-novel-backups`。
 
 ---
 

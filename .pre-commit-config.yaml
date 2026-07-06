@@ -1,0 +1,68 @@
+# ============================================================
+# obsidian-novel-publisher pre-commit hooks
+# ============================================================
+# Q13 老板拍板: 启用 pre-commit
+# 老板 git commit 前自动跑: black 格式 + ruff lint + mypy 类型 + pytest-fast
+# 任一失败 → 拒绝 commit
+# ============================================================
+
+# 通用
+default_language_version:
+  python: python3.12
+default_stages: [pre-commit]
+fail_fast: false
+
+repos:
+  # 1. ruff (linter + auto-fix)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # 2. black (formatter, 与 ruff 互补)
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        language_version: python3.12
+        types_or: [python, pyi]
+
+  # 3. mypy (类型检查)
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        args: [--strict, --ignore-missing-imports]
+        additional_dependencies: [pydantic>=2.5.0]
+        types_or: [python, pyi]
+
+  # 4. pytest-fast (本地快速单测, fail-fast)
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest unit (fast)
+        entry: pytest tests/unit -x --no-header -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # 5. 通用 hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=500]   # 封面图不进 git (走 uploads)
+      - id: detect-private-key
+      - id: no-commit-to-branch
+        args: [--branch=main]
+        stages: [manual]    # 仅在 CI 跑, 本地不强制 (避免阻碍 dev)
