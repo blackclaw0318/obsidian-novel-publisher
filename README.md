@@ -66,6 +66,7 @@
 - 🔌 [docs/API_INTEGRATION.md](docs/API_INTEGRATION.md) — obsidian-journal 接收侧 API 契约
 - 🛠 [docs/RUNBOOK.md](docs/RUNBOOK.md) — 运维 / 部署 / 故障排查
 - 🤖 [docs/CI_SETUP.md](docs/CI_SETUP.md) — GitHub Actions + branch protection 配指南
+- 📜 [docs/CHANGELOG.md](docs/CHANGELOG.md) — 版本历史
 
 ---
 
