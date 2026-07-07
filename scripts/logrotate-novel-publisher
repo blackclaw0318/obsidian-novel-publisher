@@ -1,0 +1,38 @@
+# ============================================================
+# /etc/logrotate.d/obsidian-novel-publisher
+# ============================================================
+# obsidian-novel-publisher 日志轮转配置
+# - 路径: /root/.openclaw/workspace/projects/obsidian-novel-publisher/logs/publisher.log
+# - 频率: 每天 (publisher 每天跑 3 次, 单日量 < 1MB)
+# - 保留: 30 天 (老板习惯回看 1 个月内推送历史)
+# - 压缩: gzip (省磁盘)
+# - 触发: size=50M 强制转 (防突增)
+# - 缺失不报错 (publisher 没跑过就没日志, 正常)
+# - notifempty (空日志不轮转)
+# - create 0644 root root (oneshot 每次新进程打开新文件, 不需要 copytruncate)
+#
+# 安装:   sudo cp scripts/logrotate-novel-publisher /etc/logrotate.d/obsidian-novel-publisher
+#         (或: sudo bash scripts/install-logrotate.sh)
+# 验证:   sudo logrotate -d /etc/logrotate.d/obsidian-novel-publisher
+# 强制跑: sudo logrotate -f /etc/logrotate.d/obsidian-novel-publisher
+# ============================================================
+
+/root/.openclaw/workspace/projects/obsidian-novel-publisher/logs/publisher.log {
+    daily
+    rotate 30
+    size 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    dateext
+    dateformat -%Y%m%d
+    extension .log
+    create 0644 root root
+    sharedscripts
+    postrotate
+        # systemd oneshot 每次新进程, 不需要 reopen / SIGHUP
+        # 仅打条日志方便运维追溯
+        logger -t logrotate "obsidian-novel-publisher: rotated $(basename $1)"
+    endscript
+}

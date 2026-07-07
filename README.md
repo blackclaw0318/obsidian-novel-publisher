@@ -79,9 +79,10 @@ cp .env.example .env
 python scripts/publish-once.py
 
 # 4. systemd timer 启动 (本机)
-sudo cp systemd/*.service /etc/systemd/system/
-sudo cp systemd/*.timer /etc/systemd/system/
-sudo systemctl enable --now novel-publish@{08,12,18}.timer
+sudo bash scripts/install-systemd.sh
+sudo bash scripts/install-logrotate.sh
+# 查看下次触发时间
+systemctl list-timers novel-publish.timer
 
 # 5. 查看日志
 tail -f logs/publisher.log

@@ -1,0 +1,59 @@
+# ============================================================
+# novel-publish.service - 单次推送 (oneshot)
+# ============================================================
+# 触发方式: systemd timer (08:00 / 12:00 / 18:00 Asia/Shanghai)
+# 工作目录: /root/.openclaw/workspace/projects/obsidian-novel-publisher
+# Python:   .venv/bin/python (v3.12+)
+# 日志:     /root/.openclaw/workspace/projects/obsidian-novel-publisher/logs/publisher.log
+#           (logrotate 每日切割, 保留 30 天)
+#
+# 安装:     sudo bash scripts/install-systemd.sh
+# 卸载:     sudo bash scripts/uninstall-systemd.sh
+# 状态:     systemctl status novel-publish.timer
+# 日志:     journalctl -u novel-publish.service -n 50
+#           tail -f /root/.openclaw/workspace/projects/obsidian-novel-publisher/logs/publisher.log
+# ============================================================
+
+[Unit]
+Description=Obsidian Novel Publisher (one-shot push to obsidian-journal)
+Documentation=https://github.com/blackclaw0318/obsidian-novel-publisher
+# 必须 network 在线 (要调 minimax API + obsidian-journal endpoint + GitHub backup)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/root/.openclaw/workspace/projects/obsidian-novel-publisher
+
+# venv python 走绝对路径 (systemd 不读 ~/.bashrc / PATH)
+ExecStart=/root/.openclaw/workspace/projects/obsidian-novel-publisher/.venv/bin/python -m src.publisher
+
+# 环境变量 (.env 由 EnvironmentFile 加载, 含 MINIMAXI_API_KEY / GITHUB_BACKUP_TOKEN 等)
+EnvironmentFile=/root/.openclaw/workspace/projects/obsidian-novel-publisher/.env
+
+# 优雅超时 (LLM 调用 + 封面生成 + GitHub 备份 全链路 90s 安全)
+TimeoutStartSec=120
+
+# 输出: stdout + stderr 都重定向到 logs/publisher.log
+# 用 append: 而不是 file: — logrotate 切割后下个 run 会自动开新 inode (oneshot 每次新进程)
+StandardOutput=append:/root/.openclaw/workspace/projects/obsidian-novel-publisher/logs/publisher.log
+StandardError=append:/root/.openclaw/workspace/projects/obsidian-novel-publisher/logs/publisher.log
+
+# 不需要 TTY (daemon 模式)
+StandardInput=null
+TTYPath=/dev/null
+
+# 文件描述符
+LimitNOFILE=65536
+
+# 资源限制 (防止 LLM 跑飞占内存, 上限 1GB)
+MemoryMax=1G
+
+# 安全 (root 运行但 minimal 权限)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

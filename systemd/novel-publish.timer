@@ -1,0 +1,38 @@
+# ============================================================
+# novel-publish.timer - 每天 3 次 (08:00 / 12:00 / 18:00 Asia/Shanghai)
+# ============================================================
+# 触发:   novel-publish.service (oneshot)
+# 节奏:   早 8 / 中 12 / 晚 18 (Asia/Shanghai)
+# 容错:   Persistent=true (错过自动补, 比如机器 8 点关机, 9 点起来补 8 点那次)
+# 单次:   一天 3 章 ≈ 9000 字 + 3 张封面 + 3 次 GitHub 备份
+#
+# 安装:   sudo bash scripts/install-systemd.sh
+# 查时间: systemctl list-timers novel-publish.timer
+# 下次:   systemctl status novel-publish.timer (Next elapse)
+# 手动跑: sudo systemctl start novel-publish.service (不等 timer)
+# 暂停:   sudo systemctl stop novel-publish.timer
+# ============================================================
+
+[Unit]
+Description=Obsidian Novel Publisher Timer (3x/day Asia/Shanghai)
+Documentation=https://github.com/blackclaw0318/obsidian-novel-publisher
+
+[Timer]
+# 每天 08:00, 12:00, 18:00 (本地时间 Asia/Shanghai, 依赖 host TZ)
+# 部署机器 timedatectl 必须设 Asia/Shanghai (本仓库 host 已配置)
+# 老板改作息: 改这 3 行即可, OnCalendar 用 systemd 日历表达式
+OnCalendar=*-*-* 08:00:00
+OnCalendar=*-*-* 12:00:00
+OnCalendar=*-*-* 18:00:00
+
+# 持久化 (机器宕机补跑, 启动时检查错过的时间点)
+Persistent=true
+
+# 每次触发后, 单位进入 inactive 状态 (oneshot 正常行为, 显式声明更清晰)
+RemainAfterElapse=false
+
+# 触发单位
+Unit=novel-publish.service
+
+[Install]
+WantedBy=timers.target
