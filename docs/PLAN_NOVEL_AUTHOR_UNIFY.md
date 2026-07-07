@@ -1,7 +1,7 @@
 # obsidian-novel-publisher — 小说作者名统一"上坤" 方案稿 (2026-07-08 **v3 实证**)
 
 > **作者**: 黑 (Hei)
-> **状态**: 🟢 老板拍 A — 接受现状, 不动代码 (v3 实证已通过)
+> **状态**: 🟢 **老板拍 A — 接受现状, 0 代码改动, dry-run 实证 ✅ PASS (2026-07-08 05:56)**
 > **结论**: 当前 config 层 (`lib/external-auth.ts:33`) 已将 `novel-publisher.resolveAuthorId` 映射到 admin, **未来推送的 novel post 实际 author_id = admin (上坤)** ✅; 老 ch1/ch2 保留 `novel-bot` (按老板意图)。
 > **范围**: 0 代码改动 + 1 个真实 dry-run 验证 + 文档溯源
 > **耗时**: 0.1d (文档 + 实证 + 清理)
@@ -97,23 +97,35 @@ JOIN users → name='novel-bot'  ← 老板意图保留
 
 ---
 
-## 4. 黑推荐执行路径 (✅ 采纳)
+## 4. 黑推荐执行路径 (✅ 采纳 + 实证)
 
-### 4.1 真实 dry-run 实证步骤 (10 分钟)
-1. 用 publisher 现成 HMAC 签名器 (Python `hmac_client.py`) 算一次签名
-2. POST `/api/external/posts` 到 dev 实例 (https://dev.shangkun.uk/api/external/posts OR localhost:3000)
-3. payload: `{slug: "__verify-novel-author-fix-001__", title: "[dry-run] verify author injection", content: "# test", category: "novel", external_id: "verify-novel-author-001"}`
-4. SQLite 查刚推的 post 的 `author_id` 字段
-5. 验证: `author_id == u_e7jegpeamr6790h2` (admin/上坤) → ✅
-6. 查页面渲染: `/posts/__verify-novel-author-fix-001__` → `作者: 上坤` ✅
+### 4.1 真实 dry-run 实证步骤 (✅ 完成于 2026-07-08 05:56)
+1. ✅ 用 publisher 现成 HMAC 签名器 `HmacClient().sign(body, raw_body=raw_body)`
+2. ✅ POST `/api/external/posts` 到 obsidian-dev (绕 CF 边缘, http://localhost:3000)
+3. ✅ payload: `{slug: "__verify-novel-author-fix-1783461134910__", title: "[黑·dry-run] ...", content: "...", category: "novel", external_id: "verify-novel-author-1783461134910"}`
+4. ✅ SQLite 查刚推的 post 的 `author_id` 字段
+5. ✅ 验证: `author_id == 'u_e7jegpeamr6790h2'` (admin/上坤) → **PASS**
+6. ✅ 查页面渲染: `/posts/__verify-...` → UI `作者: 上坤` + JSON-LD `author.name="上坤"` + meta `name="author" content="上坤"`
 
-### 4.2 清理
-- admin 后台删除该测试 post
-- 7 天后清理 (垃圾 post 视觉上看到就删)
+### 4.2 实证证据 (2026-07-08 05:56 现场)
+```
+[*] POST http://localhost:3000/api/external/posts
+[√] HTTP 201: {"ok":true,"post":{"id":"post_zo0rg91pmrb6pmxx","slug":"__verify-novel-author-fix-1783461134910__","url":"http://localhost:3000/posts/__verify-novel-author-fix-1783461134910__"}}
 
-### 4.3 文档落地
-- v3 plan 推 GitHub (同一 branch `plan/novel-author-unify-2026-07-08`)
-- memory daily note v3
+=== SQLite 验证 author_id ===
+[*] DB row: slug='__verify-novel-author-fix-1783461134910__', category='novel', author_id='u_e7jegpeamr6790h2'
+[*] admin user: id='u_e7jegpeamr6790h2', name='上坤'
+
+✅✅✅ PASS - author_id 注入 = admin (上坤) 符合老板意图
+
+=== 页面渲染 ===
+作者: <!-- -->上坤
+<meta name="author" content="上坤"/>
+"author":{"@type":"Person","name":"上坤","email":"admin@obsidian.local"}
+
+### 4.3 清理 (✅ 已执行)
+- ✅ DB 删除 1 row `posts WHERE slug='__verify-...'`
+- ✅ 文件 `/tmp/verify_novel_author.py` 在本机 tmp, 可手动删 (黑不删, 留作未来回归调试脚本)
 
 ---
 
@@ -171,7 +183,7 @@ Tech posts (3):
 |---|---|---|
 | `a94a306` | v1: 文档初稿 (DB UPDATE + 渲染 guard) | 已 push, 作废 |
 | `4319767` | v2: 文档重写 (route.ts:191 加 guard) | 已 push, 作废 (config 已对, 不需 route.ts 改) |
-| (待) | **v3: 文档真相核实 + dry-run 实证结果** | ⏳ 本次执行后 push |
+| (待) | **v3: 文档真相核实 + dry-run 实证结果** | ✅ 已 push (089c032 = 5:55), 后续提交 (本次) 补 dry-run PASS 实际证据 |
 
 Branch: `plan/novel-author-unify-2026-07-08`
 
