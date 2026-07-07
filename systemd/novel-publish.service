@@ -33,8 +33,9 @@ ExecStart=/root/.openclaw/workspace/projects/obsidian-novel-publisher/.venv/bin/
 # 环境变量 (.env 由 EnvironmentFile 加载, 含 MINIMAXI_API_KEY / GITHUB_BACKUP_TOKEN 等)
 EnvironmentFile=/root/.openclaw/workspace/projects/obsidian-novel-publisher/.env
 
-# 优雅超时 (LLM 调用 + 封面生成 + GitHub 备份 全链路 90s 安全)
-TimeoutStartSec=120
+# 外层兜底超时: 略大于应用内置硬时限 (PUBLISH_HARD_TIMEOUT_S 默认 900s),
+# 让应用自己的 SIGALRM 先优雅硬停 + mark_failed, systemd 只做最后兜底。
+TimeoutStartSec=960
 
 # 输出: stdout + stderr 都重定向到 logs/publisher.log
 # 用 append: 而不是 file: — logrotate 切割后下个 run 会自动开新 inode (oneshot 每次新进程)

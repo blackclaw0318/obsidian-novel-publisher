@@ -82,7 +82,11 @@ class ChapterMeta(BaseModel):
     title: str = Field(..., min_length=1)
     word_count: int = Field(..., ge=0)
     created_at: str = Field(..., min_length=1)
-    llm_usage: dict[str, int] = Field(default_factory=dict)
+    # 7-7 fix: 原本 llm_usage: dict[str, int] 过于严格, M3 v2 在 usage 里会带
+    # completion_tokens_details={"reasoning_tokens": 5370} / prompt_tokens_details={"cached_tokens": 128}
+    # 这样的嵌套 dict, 报 ValidationError 后会到 publisher 外层 except 误 mark_failed.
+    # 备份不是热路径, 保险起见用 dict[str, Any] 接收所有附加信息。
+    llm_usage: dict[str, Any] = Field(default_factory=dict)
     obsidian_post_url: str = Field(default="")
     extra: dict[str, Any] = Field(default_factory=dict)
 
@@ -92,7 +96,7 @@ class ChapterMeta(BaseModel):
         chapter_idx: int,
         title: str,
         word_count: int,
-        llm_usage: dict[str, int] | None = None,
+        llm_usage: dict[str, Any] | None = None,
         obsidian_post_url: str = "",
         **extra: Any,
     ) -> ChapterMeta:
@@ -349,7 +353,10 @@ class GithubBackup:
         if meta.obsidian_post_url:
             entry += f"- 博客: {meta.obsidian_post_url}\n"
         if meta.llm_usage:
-            tokens_total = sum(meta.llm_usage.values())
+            # 7-7 fix: M3 v2 usage 里会带嵌套 dict (cached_tokens / reasoning_tokens), sum() 会报 TypeError。
+            # 只取顶层 int 字段求和, 忽略 dict 类型的 *_tokens_details。
+            int_values = [v for v in meta.llm_usage.values() if isinstance(v, (int, float))]
+            tokens_total = int(sum(int_values))
             entry += f"- LLM tokens: {tokens_total} (prompt={meta.llm_usage.get('prompt_tokens', 0)}, completion={meta.llm_usage.get('completion_tokens', 0)})\n"
 
         # 如果当日 section 不存在, 加 header; 已存在则插入到当日 section 末尾
@@ -392,7 +399,7 @@ class GithubBackup:
         """
         url = self._url(path)
         try:
-            resp = requests.get(url, headers=self._headers(), timeout=self.timeout_s)
+            resp = requests.get(url, headers=self._headers(), timeout=(10, self.timeout_s))
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
@@ -464,7 +471,7 @@ class GithubBackup:
                     path,
                     len(content_bytes),
                 )
-                resp = requests.put(url, headers=self._headers(), json=body, timeout=self.timeout_s)
+                resp = requests.put(url, headers=self._headers(), json=body, timeout=(10, self.timeout_s))
 
                 # 4xx: 参数错, 立即抛
                 if 400 <= resp.status_code < 500:
@@ -526,7 +533,7 @@ class GithubBackup:
         """
         url = self._url(path)
         try:
-            resp = requests.get(url, headers=self._headers(), timeout=self.timeout_s)
+            resp = requests.get(url, headers=self._headers(), timeout=(10, self.timeout_s))
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()

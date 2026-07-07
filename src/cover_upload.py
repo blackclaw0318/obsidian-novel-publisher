@@ -98,7 +98,10 @@ class CoverUploader:
         file_size = jpg_path.stat().st_size
 
         url = f"{self.base_url}/api/admin/resources"
-        headers = {"Authorization": f"Bearer {self.admin_token}"}
+        # obsidian-journal 走 session cookie 鉴权 (lib/auth.ts: getSessionJwtFromCookie)
+        # 不用 Authorization: Bearer (server 端读不到)
+        # admin_token 实为 admin JWT, 通过 Cookie 头发送
+        headers = {"Cookie": f"obsidian_session={self.admin_token}"}
 
         last_err: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
@@ -119,7 +122,7 @@ class CoverUploader:
                         headers=headers,
                         files=files,
                         data=data,
-                        timeout=self.timeout_s,
+                        timeout=(10, self.timeout_s),
                     )
 
                 # 4xx 参数错: 立即抛, 不重试
@@ -141,12 +144,15 @@ class CoverUploader:
                 if not body.get("ok"):
                     raise CoverUploadError(f"上传响应 ok=false: {body.get('error', 'unknown')}")
 
-                resource = body.get("resource", {})
+                # 7-7 fix: 兼容 obsidian-journal v0.34 P4 改的字段名 (resource → media)
+                # v0.34 之前: body["resource"]["url"]
+                # v0.34 P4 之后: body["media"]["url"]  ← 实际格式
+                resource = body.get("media") or body.get("resource") or {}
                 resource_url = resource.get("url")
                 resource_id = str(resource.get("id", ""))
 
                 if not resource_url:
-                    raise CoverUploadError(f"响应缺 url: {body}")
+                    raise CoverUploadError(f"响应缺 url (media/resource 字段都没有): {body}")
 
                 logger.info("[cover_upload] 成功: %s (id=%s)", resource_url, resource_id)
                 return CoverUploadResult(

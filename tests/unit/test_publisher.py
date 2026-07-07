@@ -7,7 +7,7 @@
 #   - run_once: skip_next 跳过 (state.mark_skipped, 不推进 next_idx)
 #   - run_once: force=True 绕过 skip_next
 #   - run_once: LLMError → state.mark_failed + 抛 ChapterGenError
-#   - run_once: CoverUploadError → state.mark_failed + 抛 CoverGenError
+#   - run_once: 封面 生成/上传 失败 → 降级为无封面推送 (仍 success) [7-7 变更: 不再阻断]
 #   - run_once: 未知异常 → state.mark_failed + 抛 PublisherError
 #   - run_once: GitHub 备份失败 → 主推送仍成功
 # ============================================================
@@ -21,7 +21,6 @@ import pytest
 
 from src.publisher import (
     ChapterGenError,
-    CoverGenError,
     PublisherConfig,
     PublisherConfigError,
     PublisherError,
@@ -175,16 +174,22 @@ class TestRunOnceFailure:
                 assert state.last_status == "failed"
                 assert state.next_idx == 1  # 不推进
 
-    def test_cover_upload_error_marks_failed(self, config: PublisherConfig) -> None:
-        """封面上传失败 → state.mark_failed + 抛 CoverGenError"""
+    def test_cover_upload_error_degrades_to_text_only(self, config: PublisherConfig) -> None:
+        """封面上传失败 → 降级为无封面纯文本推送, 仍成功 (图片失败不阻断小说)"""
         from src.cover_upload import CoverUploadError
         from src.novel_writer import ChapterDraft
+
+        posted: dict = {}
+
+        def _capture_post(url, body, sig_headers, *, raw_body=None):  # noqa: ARG001
+            posted["body"] = body
+            return {"ok": True}
 
         with patch("src.publisher.generate_one_shot") as mock_topic:
             mock_topic.return_value = [MagicMock(title="T", outline="O", keywords_used=[])]
             with patch("src.publisher.NovelWriter.write_chapter") as mock_write:
                 mock_write.return_value = ChapterDraft(
-                    raw_text="x", cover_prompt="p", word_count=3000
+                    raw_text="章节正文。" * 100, cover_prompt="p", word_count=3000
                 )
                 with patch("src.publisher.CoverGenerator.generate", return_value="/tmp/c.jpg"):
                     Path("/tmp/c.jpg").write_bytes(b"\xff" * 1000)
@@ -193,10 +198,13 @@ class TestRunOnceFailure:
                             "src.publisher.CoverUploader.upload",
                             side_effect=CoverUploadError("4xx"),
                         ):
-                            with pytest.raises(CoverGenError, match="封面上传失败"):
-                                run_once(config)
-                            state = load_state(config.state_path)
-                            assert state.last_status == "failed"
+                            with patch("src.publisher._post_with_sig", side_effect=_capture_post):
+                                result = run_once(config)
+                        # 封面挂了, 但小说仍成功推送
+                        assert result.last_status == "success"
+                        assert result.next_idx == 2
+                        # 推送正文不应含封面图 markdown
+                        assert "![" not in posted["body"]["content"]
                     finally:
                         Path("/tmp/c.jpg").unlink(missing_ok=True)
 
@@ -208,6 +216,26 @@ class TestRunOnceFailure:
             state = load_state(config.state_path)
             assert state.last_status == "failed"
             assert "RuntimeError" in (state.last_error or "")
+
+    def test_cover_gen_error_degrades_to_text_only(self, config: PublisherConfig) -> None:
+        """封面*生成*失败 → 同样降级为无封面推送, 不阻断小说"""
+        from src.cover_gen import CoverGenError as _CoverGenError
+        from src.novel_writer import ChapterDraft
+
+        with patch("src.publisher.generate_one_shot") as mock_topic:
+            mock_topic.return_value = [MagicMock(title="T", outline="O", keywords_used=[])]
+            with patch("src.publisher.NovelWriter.write_chapter") as mock_write:
+                mock_write.return_value = ChapterDraft(
+                    raw_text="正文。" * 100, cover_prompt="p", word_count=3000
+                )
+                with patch(
+                    "src.publisher.CoverGenerator.generate",
+                    side_effect=_CoverGenError("image API 挂了"),
+                ):
+                    with patch("src.publisher._post_with_sig", return_value={"ok": True}):
+                        result = run_once(config)
+                assert result.last_status == "success"
+                assert result.next_idx == 2
 
 
 # ============ run_once + GitHub 备份 ============

@@ -67,15 +67,15 @@ class TestMockLLM:
 
 # ============ MockObsidian ============
 class TestMockObsidian:
-    def test_external_posts_success(self) -> None:
+    def test_external_chapters_success(self) -> None:
         obs = MockObsidian()
         with obs.patch():
             resp = requests.post(
-                "https://obs.example.com/api/external/posts",
-                json={"slug": "test"},
+                "https://obs.example.com/api/external/chapters",
+                json={"chapter_slug": "test", "novel_slug": "n", "volume_title": "v", "chapter_title": "t", "chapter_content": "c", "external_id": "e1"},
             )
         assert resp.status_code == 201
-        assert obs.posts_received[0]["kwargs"]["json"]["slug"] == "test"
+        assert obs.chapters_received[0]["kwargs"]["json"]["chapter_slug"] == "test"
 
     def test_admin_resources_success(self) -> None:
         obs = MockObsidian()
@@ -91,8 +91,8 @@ class TestMockObsidian:
     def test_fail_count(self) -> None:
         obs = MockObsidian(fail_count=1)
         with obs.patch():
-            r1 = requests.post("https://obs.example.com/api/external/posts", json={})
-            r2 = requests.post("https://obs.example.com/api/external/posts", json={})
+            r1 = requests.post("https://obs.example.com/api/external/chapters", json={})
+            r2 = requests.post("https://obs.example.com/api/external/chapters", json={})
         assert r1.status_code == 500
         assert r2.status_code == 201
 
@@ -139,7 +139,7 @@ class TestSetupHelpers:
             r = requests.post("https://api.minimaxi.com/v1/chat/completions", json={})
             assert r.status_code == 500  # 配 fail_times=1
             # obsidian
-            r = requests.post("https://obs.example.com/api/external/posts", json={})
+            r = requests.post("https://obs.example.com/api/external/chapters", json={})
             assert r.status_code == 201
             # github
             r = requests.request(

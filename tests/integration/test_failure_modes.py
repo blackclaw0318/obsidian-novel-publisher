@@ -212,7 +212,7 @@ class TestObsidianFailure:
         # 推送 401
         call_count = {"n": 0}
 
-        def fake_post(url, body, sig_headers):
+        def fake_post(url, body, sig_headers, **kwargs):
             call_count["n"] += 1
             resp = _mock_resp(401, body={"error": "bad_signature"}, text="bad signature")
             resp.raise_for_status()
@@ -257,7 +257,7 @@ class TestObsidianFailure:
             ),
         )
 
-        def fake_post(url, body, sig_headers):
+        def fake_post(url, body, sig_headers, **kwargs):
             raise requests.exceptions.HTTPError("500 blog down")
 
         monkeypatch.setattr("src.publisher._post_with_sig", fake_post)

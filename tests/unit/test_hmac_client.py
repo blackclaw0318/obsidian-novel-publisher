@@ -12,6 +12,8 @@ test_hmac_client.py — hmac_client.py 单元测试
 
 from __future__ import annotations
 
+import json
+
 from src.hmac_client import (
     HmacClient,
     HmacConfig,
@@ -126,8 +128,22 @@ class TestHmacClientSign:
         )  # noqa: F841 验证构造即可
         body = {"chapter": 1, "title": "测试"}
         headers = client.sign(body, timestamp_ms=1717699200000)
-        expected_sig = compute_signature(SECRET, 1717699200000, body)
+        # 默认契约: 签 over json.dumps(body) (与 HTTP 发送 body 字节一致)
+        expected_sig = compute_signature(SECRET, 1717699200000, body_bytes=json.dumps(body, ensure_ascii=False))
         assert headers["X-Publisher-Signature"] == expected_sig
+
+    def test_signature_uses_raw_body_when_provided(self):
+        client = HmacClient(
+            HmacConfig(publish_id="x", publish_secret=SECRET)
+        )  # noqa: F841 验证构造即可
+        body = {"a": 1, "b": 2}
+        raw = '{"a":1,"b":2}'  # 服务端真实收的字节
+        headers = client.sign(body, raw_body=raw, timestamp_ms=1717699200000)
+        expected_sig = compute_signature(SECRET, 1717699200000, body_bytes=raw)
+        assert headers["X-Publisher-Signature"] == expected_sig
+        # 同时验证用 raw 签的, 跟默认 (用 json.dumps) 签的不一致
+        default_sig = compute_signature(SECRET, 1717699200000, body_bytes=json.dumps(body, ensure_ascii=False))
+        assert headers["X-Publisher-Signature"] != default_sig
 
 
 class TestHmacClientVerify:
