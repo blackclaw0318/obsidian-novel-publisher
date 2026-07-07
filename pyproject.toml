@@ -150,7 +150,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]  # 允许 pytest assert
+"tests/*" = ["S101", "SIM117"]  # 允许 pytest assert + 嵌套 with (mock 测试常见)
 
 [tool.ruff.format]
 quote-style = "double"

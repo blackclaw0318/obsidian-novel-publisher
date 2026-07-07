@@ -185,7 +185,7 @@ class TopicGenerator:
         - **修复 outline/title 字段内未转义的 ASCII " (M3 中文场景常见)** ← 新增
         - JSON 解析
         """
-        from novel_writer import strip_think_block
+        from .novel_writer import strip_think_block
 
         cleaned = strip_think_block(raw).strip()
 
