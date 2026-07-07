@@ -1,10 +1,12 @@
 # obsidian-novel-publisher
 
 > 每天 3 次自动生成中场篇科幻小说, 推送到 obsidian-journal 个人博客
-> **状态**: 🚧 开发中 v0.2 (P0 + P1 + P2 已落地, P3 GitHub 备份待启动)
+> **状态**: 🚧 开发中 v0.2 (P0-P6 ✅ + P7 CI/CD ✅)
 
+[![CI](https://github.com/blackclaw0318/obsidian-novel-publisher/actions/workflows/ci.yml/badge.svg)](https://github.com/blackclaw0318/obsidian-novel-publisher/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-proposal-yellow)]()
-[![Python](https://img.shields.io/badge/python-3.12+-blue)]()
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)]()
+[![Tests](https://img.shields.io/badge/tests-199%20passed-brightgreen)]()
 [![LLM](https://img.shields.io/badge/LLM-MiniMax--M3-orange)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
 
@@ -50,8 +52,9 @@
 ## 🚦 状态
 
 - [x] **v0.1 方案稿** (2026-07-05) — 本 README
-- [ ] 等老板拍 Q1-Q8 决策
-- [ ] v0.2 P0-P6 实施 (~4d)
+- [x] **v0.2 P0-P6 实施** (2026-07-06 完成) — 199 测试, 6 个模块
+- [x] **v0.2 P7 CI/CD** (2026-07-07 完成) — GitHub Actions 6 jobs
+- [ ] 等老板手动配 branch protection (1 分钟, 详见 [docs/CI_SETUP.md](docs/CI_SETUP.md))
 - [ ] v1.0 上线, 每天 3 章自动推送
 
 ---
@@ -62,6 +65,7 @@
 - 🏗️ [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 详细技术架构
 - 🔌 [docs/API_INTEGRATION.md](docs/API_INTEGRATION.md) — obsidian-journal 接收侧 API 契约
 - 🛠 [docs/RUNBOOK.md](docs/RUNBOOK.md) — 运维 / 部署 / 故障排查
+- 🤖 [docs/CI_SETUP.md](docs/CI_SETUP.md) — GitHub Actions + branch protection 配指南
 
 ---
 
