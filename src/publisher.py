@@ -444,8 +444,24 @@ def _run_one_novel(
         cover_path: Path | None = None
         try:
             config.cover_tmp_dir.mkdir(parents=True, exist_ok=True)
+            # 7-8 P2.5: ch-2+ 用 ch-(idx-1) 封面公网 URL 作 subject_reference
+            # ch-1 idx=1 → subject_reference_url=None → 走 text-to-image
+            # ch-2+ 拿 state.cover_urls.get(str(idx-1)) (如果有效公网 URL)
+            subject_ref_url: str | None = None
+            if idx >= 2:
+                prev_url = state.cover_urls.get(str(idx - 1), "")
+                if prev_url:
+                    subject_ref_url = prev_url
+                    logger.info(
+                        "[%s/%d] image-to-image 启用, 参考图: %s",
+                        novel.id, idx, prev_url[:60] + "...",
+                    )
             logger.info("[%s/%d] 画封面…", novel.id, idx)
-            cover_local_path = cover_gen.generate(prompt=draft.cover_prompt, chapter_idx=idx)
+            cover_local_path = cover_gen.generate(
+                prompt=draft.cover_prompt,
+                chapter_idx=idx,
+                subject_reference_url=subject_ref_url,
+            )
             cp = Path(cover_local_path)
             if not cp.exists():
                 raise CoverGenError(f"CoverGenerator 返回路径不存在: {cp}")
@@ -523,10 +539,13 @@ def _run_one_novel(
                     novel.id, idx, type(e).__name__, e,
                 )
 
-        # 9. 成功: 写 state (带 slot, 多本并行配额检查)
-        state.mark_pushed(idx, idem_key, slot=slot)
+        # 9. 成功: 写 state (带 slot + cover_url, 多本并行配额检查 + image-to-image)
+        state.mark_pushed(idx, idem_key, slot=slot, cover_url=cover_url)
         save_state_for_novel(state, novel.id)
-        logger.info("[%s/%d] ✓ 推送成功: idem=%s slot=%s", novel.id, idx, idem_key[:8], slot)
+        logger.info(
+            "[%s/%d] ✓ 推送成功: idem=%s slot=%s cover=%s",
+            novel.id, idx, idem_key[:8], slot, cover_url[:60] if cover_url else "(无)",
+        )
         return state
 
     except LLMError as e:

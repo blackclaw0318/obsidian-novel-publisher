@@ -54,6 +54,9 @@ class PublishState:
     # 7-8 P2: 多本并行配额检查 (e.g. "2026-07-08-08" = 今天 8 点档已写过)
     # 默认空串 = 从未写过, 兼容老 v0.2 state.json (没此字段)
     last_pushed_slot: str = ""
+    # 7-8 P2.5: ch-(N+1) 封面 image-to-image 参考图, idx → cover 公网 URL (e.g. "https://www.shangkun.uk/uploads/abc.jpg")
+    # 默认空 dict = 从未记录, 兼容老 state.json
+    cover_urls: dict[str, str] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
 
     # ------------------------------------------------------------------
@@ -74,13 +77,15 @@ class PublishState:
     # ------------------------------------------------------------------
     # 状态转移
     # ------------------------------------------------------------------
-    def mark_pushed(self, idx: int, idem_key: str, *, slot: str = "") -> None:
+    def mark_pushed(self, idx: int, idem_key: str, *, slot: str = "", cover_url: str = "") -> None:
         """推送成功后调用: next_idx++, last_pushed_* 更新, idempotency 记录
 
         Args:
             idx:       本次推的章节号
             idem_key:  幂等 key
             slot:      推送档位标识 (e.g. "2026-07-08-08"), 用于多本并行配额检查
+            cover_url: 封面公网 URL (e.g. "https://www.shangkun.uk/uploads/abc.jpg"),
+                       用于下一章 image-to-image subject_reference
         """
         self.next_idx = idx + 1
         self.last_pushed_idx = idx
@@ -90,6 +95,8 @@ class PublishState:
         self.idempotency_keys[str(idx)] = idem_key
         if slot:
             self.last_pushed_slot = slot
+        if cover_url:
+            self.cover_urls[str(idx)] = cover_url
         # skip_next 用一次就清 (不论成功失败, 一次性)
         if self.skip_next:
             self.skip_next = False

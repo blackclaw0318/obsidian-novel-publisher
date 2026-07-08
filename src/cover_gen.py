@@ -69,12 +69,22 @@ class CoverGenerator:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def generate(self, prompt: str, chapter_idx: int) -> str:
+    def generate(
+        self,
+        prompt: str,
+        chapter_idx: int,
+        *,
+        subject_reference_url: str | None = None,
+    ) -> str:
         """生成封面, 返回本地绝对路径。
 
         Args:
             prompt: 封面描述 (英文, 已套模板; 不含真人/IP/品牌)
             chapter_idx: 章节序号 (1-based), 用作文件名
+            subject_reference_url: minimax image-to-image 参考图 URL (ch-2+ 用)
+                - 必须是 minimax 服务端能访问的公网 URL (e.g. https://www.shangkun.uk/uploads/abc.jpg)
+                - None / 空 / localhost 退化: 走纯 text-to-image (ch-1 默认路径)
+                - 7-8 P2.5 老板拍: 拿上一章封面公网 URL 作 subject_reference, 锁角色
 
         Returns:
             本地绝对路径 (str), 例如 /workspace/data/covers/001.jpg
@@ -86,7 +96,7 @@ class CoverGenerator:
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 logger.info(f"[CoverGen] 第 {attempt}/{self.MAX_RETRIES} 次: idx={chapter_idx}")
-                url = self._call_image_api(prompt)
+                url = self._call_image_api(prompt, subject_reference_url=subject_reference_url)
                 out_path = self._download(url, chapter_idx)
                 if self._validate(out_path):
                     logger.info(f"[CoverGen] ✅ 成功: {out_path}")
@@ -111,10 +121,11 @@ class CoverGenerator:
 
         raise CoverGenError(f"封面生成失败 (重试 {self.MAX_RETRIES} 次): {last_err}")
 
-    def _call_image_api(self, prompt: str) -> str:
+    def _call_image_api(self, prompt: str, *, subject_reference_url: str | None = None) -> str:
         """调 minimax /image_generation, 返回图片 URL。
 
         v0.5 fix: timeout 60s → 120s (image-01 实测 70-80s, 60s timeout 频繁误杀)
+        v0.3.2 P2.5: 老板拍, ch-2+ 加 subject_reference (image-to-image 锁角色)
         """
         url = f"{self.base_url}/image_generation"
         headers = {
@@ -129,6 +140,26 @@ class CoverGenerator:
             "n": 1,
             "prompt_optimizer": True,
         }
+        # 7-8 P2.5: 老板拍, image-to-image 锁角色
+        # minimax 官方支持: subject_reference = [{"type": "character", "image_file": "<公网 URL>"}]
+        # 当前 1 张/次限制, 我们只需锁主角 1 人
+        if subject_reference_url and self._is_minimax_accessible_url(subject_reference_url):
+            payload["subject_reference"] = [
+                {
+                    "type": "character",
+                    "image_file": subject_reference_url,
+                }
+            ]
+            logger.info(
+                "[CoverGen] 启用 image-to-image, subject_reference: %s",
+                subject_reference_url[:60] + "...",
+            )
+        elif subject_reference_url:
+            logger.warning(
+                "[CoverGen] subject_reference_url 是 %s (minimax 不可访问), 退化 text-to-image",
+                subject_reference_url[:60],
+            )
+
         resp = requests.post(url, headers=headers, json=payload, timeout=(10, 120))
         resp.raise_for_status()
         body = resp.json()
@@ -139,6 +170,23 @@ class CoverGenerator:
         except (KeyError, IndexError, TypeError) as e:
             raise CoverGenError(f"响应字段异常: {body}") from e
         return image_url
+
+    @staticmethod
+    def _is_minimax_accessible_url(url: str) -> bool:
+        """判断 URL minimax 服务端能否访问
+
+        必须 http(s) 且不是 localhost / 127.0.0.1 / 0.0.0.0 / 内网 IP
+        """
+        if not url:
+            return False
+        u = url.lower()
+        if not (u.startswith("http://") or u.startswith("https://")):
+            return False
+        # 黑名单: 本地/内网 (minimax 是公网, 访问不到)
+        for prefix in ("http://localhost", "http://127.0.0.1", "http://0.0.0.0", "http://192.168.", "http://10."):
+            if u.startswith(prefix):
+                return False
+        return True
 
     def _download(self, url: str, chapter_idx: int) -> pathlib.Path:
         """下载远程图到本地。"""
