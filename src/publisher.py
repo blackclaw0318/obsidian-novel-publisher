@@ -73,6 +73,9 @@ from .state_per_novel import (
     save_state_for_novel,
 )
 from .style_guide import fetch_style_guide
+from .cover_prompt_builder import build_cover_prompt
+from .character_loader import Characters as CharactersParsed
+from .style_guide import StyleGuide as StyleGuideParsed
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +353,8 @@ def _run_one_novel(
     outline_text = ""
     style_guide_dict: dict = {}
     characters_dict: dict = {}
+    sg_parsed: StyleGuideParsed | None = None
+    ch_parsed: CharactersParsed | None = None
     if backup_reader is not None:
         try:
             o = fetch_outline(
@@ -365,6 +370,7 @@ def _run_one_novel(
                 backup_reader, novel.id, novel.paths.style_guide,
                 cache_dir=DEFAULT_STATE_DIR.parent / "cache",
             )
+            sg_parsed = sg
             style_guide_dict = {
                 "title": novel.title,
                 "genre_hint": novel.category,
@@ -384,6 +390,7 @@ def _run_one_novel(
                 backup_reader, novel.id, novel.paths.characters,
                 cache_dir=DEFAULT_STATE_DIR.parent / "cache",
             )
+            ch_parsed = ch
             if ch.main:
                 characters_dict = {
                     "main": {
@@ -445,8 +452,6 @@ def _run_one_novel(
         try:
             config.cover_tmp_dir.mkdir(parents=True, exist_ok=True)
             # 7-8 P2.5: ch-2+ 用 ch-(idx-1) 封面公网 URL 作 subject_reference
-            # ch-1 idx=1 → subject_reference_url=None → 走 text-to-image
-            # ch-2+ 拿 state.cover_urls.get(str(idx-1)) (如果有效公网 URL)
             subject_ref_url: str | None = None
             if idx >= 2:
                 prev_url = state.cover_urls.get(str(idx - 1), "")
@@ -456,9 +461,31 @@ def _run_one_novel(
                         "[%s/%d] image-to-image 启用, 参考图: %s",
                         novel.id, idx, prev_url[:60] + "...",
                     )
+
+            # 7-8 P3: 用 style_guide + characters 驱动 cover prompt (替代 draft.cover_prompt)
+            # 老板拍: style_guide.md 显式 prompt + character_refs 固定描述, 跨章一致
+            if sg_parsed is not None:
+                cover_prompt = build_cover_prompt(
+                    style_guide=sg_parsed,
+                    characters=ch_parsed,
+                    chapter_idx=idx,
+                    chapter_scene=outline_text[:200] if outline_text else "",
+                )
+                logger.info(
+                    "[%s/%d] cover prompt 用 style_guide 驱动 (length=%d, template=%s)",
+                    novel.id, idx, len(cover_prompt),
+                    "CUSTOM" if sg_parsed.cover_prompt_template.strip() else "DEFAULT",
+                )
+            else:
+                cover_prompt = draft.cover_prompt  # fallback: novel_writer 生成的
+                logger.info(
+                    "[%s/%d] cover prompt 用 novel_writer 退化 (length=%d)",
+                    novel.id, idx, len(cover_prompt),
+                )
+
             logger.info("[%s/%d] 画封面…", novel.id, idx)
             cover_local_path = cover_gen.generate(
-                prompt=draft.cover_prompt,
+                prompt=cover_prompt,
                 chapter_idx=idx,
                 subject_reference_url=subject_ref_url,
             )
