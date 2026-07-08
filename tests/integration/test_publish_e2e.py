@@ -116,7 +116,8 @@ class TestFullPipeline:
         assert len(mocks["post_calls"]) == 1
         call = mocks["post_calls"][0]
         # 2026-07-08: publisher 改推 /api/external/chapters (3-tier Novel + Volume + Chapter)
-        assert call["url"] == "https://shangkun.uk/api/external/chapters"
+        # 7-8 fix: 7-6 域名迁移 dev.shangkun.uk → www.shangkun.uk, 改 www
+        assert call["url"] == "https://www.shangkun.uk/api/external/chapters"
         assert call["body"]["novel_slug"] == "meta-realm"
         assert call["body"]["novel_title"] == "元界"
         assert call["body"]["volume_title"] == "第一卷 · 星海之始"

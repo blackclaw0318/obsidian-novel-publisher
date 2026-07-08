@@ -99,7 +99,8 @@ def test_logrotate_config_exists() -> None:
 
 
 def test_logrotate_dry_run() -> None:
-    """logrotate -d 干跑语法检查"""
+    """logrotate -d 干跑语法检查 (7-8 fix: 不强求 'error:' 子串 — CI 环境
+    跑 /var/lib/logrotate/status 报 'permission denied' 是环境问题非 config 错)"""
     logrotate_bin = shutil.which("logrotate") or "/usr/sbin/logrotate"
     if not Path(logrotate_bin).exists():
         return
@@ -109,9 +110,15 @@ def test_logrotate_dry_run() -> None:
         text=True,
         check=False,
     )
-    # logrotate -d 干跑返回 0 或非 0 都可能, 但不能有 'error:' 关键字
     combined = result.stdout + result.stderr
-    assert "error:" not in combined.lower(), f"logrotate -d 报 error:\n{combined}"
+    # 只检查语法错误 (config 路径找不到 / parse 错), 跳过环境 / 权限类
+    syntax_errors = [
+        line for line in combined.splitlines()
+        if "error:" in line.lower()
+        and "permission denied" not in line.lower()
+        and "stat of" not in line.lower()
+    ]
+    assert not syntax_errors, "logrotate -d 报语法错:\n" + "\n".join(syntax_errors)
 
 
 # ============ install / uninstall 脚本 ============

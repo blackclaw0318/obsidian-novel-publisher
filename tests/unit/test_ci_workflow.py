@@ -89,9 +89,10 @@ def test_lint_job(workflow: dict) -> None:
 
 # ============ Unit-test job ============
 def test_unit_test_matrix(workflow: dict) -> None:
+    # 7-8 决策: pyproject requires-python=">=3.12", 3.11 装包阶段被拒
+    # matrix 只保留 3.12, 节省 CI 配额
     job = workflow["jobs"]["unit-test"]
     matrix = job["strategy"]["matrix"]
-    assert "3.11" in matrix["python-version"]
     assert "3.12" in matrix["python-version"]
     assert job["needs"] == "lint"
 
