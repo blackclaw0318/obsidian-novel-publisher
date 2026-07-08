@@ -527,6 +527,14 @@ def _run_one_novel(
             "chapter_published": True,
             "external_id": f"{novel.id}-ch{idx:03d}",
             "idempotency_key": idem_key,
+            # v0.38 P6: 版权声明 2 字段 (随每章推送, obsidian 端入库)
+            "license": os.environ.get("PUBLISHER_LICENSE", "CC BY-NC-SA 4.0"),
+            "license_url": os.environ.get(
+                "PUBLISHER_LICENSE_URL",
+                "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+            ),
+            "copyright_holder": os.environ.get("PUBLISHER_COPYRIGHT_HOLDER", "上坤"),
+            "aigc_disclosure": int(os.environ.get("PUBLISHER_AIGC_DISCLOSURE", "1")),
         }
         raw_body = json.dumps(body, ensure_ascii=False)
         sig_headers = hmac.sign(body, idempotency_key=idem_key, raw_body=raw_body)

@@ -287,6 +287,13 @@ def test_run_all_novels_full_pipeline(isolated, config, monkeypatch: pytest.Monk
     assert "idempotency_key" in by_novel["meta-realm"]
     assert by_novel["glass-sea"]["idempotency_key"] != by_novel["meta-realm"]["idempotency_key"]
 
+    # 6.5 v0.38 P6: 版权声明 4 字段 (随每章推送, obsidian 端入库)
+    for body in bodies:
+        assert body["license"] == "CC BY-NC-SA 4.0"
+        assert body["license_url"] == "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+        assert body["copyright_holder"] == "上坤"
+        assert body["aigc_disclosure"] == 1
+
     # 7. state 各自推进
     state_a = load_state_for_novel("a_obsidian", auto_migrate=False)
     state_b = load_state_for_novel("b_obsidian", auto_migrate=False)

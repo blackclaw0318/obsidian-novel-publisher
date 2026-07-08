@@ -1,6 +1,7 @@
 # ============================================================
 # novel-publish.service - 单次推送 (oneshot)
 # ============================================================
+# v0.3.2 P6 升级: 加 --all (多本并行) + 显式 TZ (Asia/Shanghai)
 # 触发方式: systemd timer (08:00 / 12:00 / 18:00 Asia/Shanghai)
 # 工作目录: /root/.openclaw/workspace/projects/obsidian-novel-publisher
 # Python:   .venv/bin/python (v3.12+)
@@ -15,7 +16,7 @@
 # ============================================================
 
 [Unit]
-Description=Obsidian Novel Publisher (one-shot push to obsidian-journal)
+Description=Obsidian Novel Publisher (multi-novel, 3x/day Asia/Shanghai)
 Documentation=https://github.com/blackclaw0318/obsidian-novel-publisher
 # 必须 network 在线 (要调 minimax API + obsidian-journal endpoint + GitHub backup)
 After=network-online.target
@@ -27,11 +28,17 @@ User=root
 Group=root
 WorkingDirectory=/root/.openclaw/workspace/projects/obsidian-novel-publisher
 
+# v0.3.2 P6: --all 走 run_all_novels (多本并行, 错误隔离, 配额检查)
 # venv python 走绝对路径 (systemd 不读 ~/.bashrc / PATH)
-ExecStart=/root/.openclaw/workspace/projects/obsidian-novel-publisher/.venv/bin/python -m src.publisher
+ExecStart=/root/.openclaw/workspace/projects/obsidian-novel-publisher/.venv/bin/python -m src.publisher --all
 
 # 环境变量 (.env 由 EnvironmentFile 加载, 含 MINIMAXI_API_KEY / GITHUB_BACKUP_TOKEN 等)
 EnvironmentFile=/root/.openclaw/workspace/projects/obsidian-novel-publisher/.env
+
+# v0.3.2 P6: 显式 TZ (host TZ 漂移会导致 slot 错乱)
+# slot 计算靠 _current_slot(now_utc, schedule, tz_name="Asia/Shanghai")
+# 显式覆盖比依赖 host timedatectl 更稳
+Environment=TZ=Asia/Shanghai
 
 # 外层兜底超时: 略大于应用内置硬时限 (PUBLISH_HARD_TIMEOUT_S 默认 900s),
 # 让应用自己的 SIGALRM 先优雅硬停 + mark_failed, systemd 只做最后兜底。
@@ -49,8 +56,8 @@ TTYPath=/dev/null
 # 文件描述符
 LimitNOFILE=65536
 
-# 资源限制 (防止 LLM 跑飞占内存, 上限 1GB)
-MemoryMax=1G
+# 资源限制 (防止 LLM 跑飞占内存, 上限 1GB; 多本并行时按 N 本叠加, N=2 时 2GB)
+MemoryMax=2G
 
 # 安全 (root 运行但 minimal 权限)
 NoNewPrivileges=true
