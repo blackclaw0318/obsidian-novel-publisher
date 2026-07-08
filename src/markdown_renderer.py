@@ -86,6 +86,10 @@ def render(
         md_parts.append(f"![{chapter_title} 封面]({cover_url})")
         md_parts.append("")
 
+    # 7-8 P4 L3: 拼接后 section delimiter (\n\n---\n\n) 会在 闭引号前插入空行
+    # 每个 section 内部再过一遍 _merge_orphan_quotes
+    from .text_punct import _merge_orphan_quotes
+    sections = [_merge_orphan_quotes(s) for s in sections]
     md_parts.extend(_join_sections(sections))
 
     content_md = "\n".join(md_parts)
@@ -107,10 +111,13 @@ _SENTENCE_END = re.compile(r"([。！？!?][\s\n]*|[\n]{2,})")
 
 
 def _normalize_text(text: str) -> str:
-    """清理文本: 去首尾空白 + 合并连续空行 + 去连续空白"""
+    """清理文本: 去首尾空白 + 合并连续空行 + 去连续空白 + 「」 孤行合并 (L3 兜底)"""
+    from .text_punct import _merge_orphan_quotes
     text = text.strip()
     # 合并 3+ 连续空行为 2 个 (即一个空段间隔)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    # 7-8 P4 L3: 「」 孤行兜底 (render 渲染前最后一遍)
+    text = _merge_orphan_quotes(text)
     return text
 
 

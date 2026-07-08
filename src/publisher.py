@@ -50,7 +50,7 @@ from .state import (
     load_state,
     save_state,
 )
-from .text_punct import normalize_cn_punctuation
+from .text_punct import _merge_orphan_quotes, normalize_cn_punctuation
 from .topic_gen import generate_one_shot
 
 # P2: 多本并行调度
@@ -824,6 +824,8 @@ def run_once(
         # 7-7 修复: 在生成 draft 后立即 normalization, 一份 clean text 既给 renderer
         # 也给 GitHub 备份 (与发布上线的文本一致)
         clean_raw_text = normalize_cn_punctuation(draft.raw_text)
+        # 7-8 P4: 「」 孤行合并 (L2, 渲染前 markdown_renderer 还有 L3 兜底)
+        clean_raw_text = _merge_orphan_quotes(clean_raw_text)
 
         rendered = render_markdown(
             raw_text=clean_raw_text,

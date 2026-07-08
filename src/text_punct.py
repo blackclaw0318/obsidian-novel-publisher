@@ -155,3 +155,61 @@ def _next_cjk(text: str, from_idx: int, n: int) -> str:
     if j < n and _is_cjk(text[j]):
         return text[j]
     return ""
+
+
+# ============================================================
+# 7-8 P4: 「」 孤行合并 (L2 后处理)
+# ============================================================
+# M3 输出按 token 拆时偶现:
+#   她低声说:「我做了一个梦,
+#   梦里全是光。
+#   」  ← 老板截图反例
+# 中文排版规范: 引号紧贴文字; 段内引语可多行但首尾引号贴邻
+# 这里我们 3 层防护:
+#   L1: prompt 强化 (assets/prompts/system.txt 排版铁律)
+#   L2: 本函数 (text_punct._merge_orphan_quotes) — normalize 后调用
+#   L3: markdown_renderer._normalize_text 渲染前过一遍
+
+
+# 3 个独立正则 (顺序重要):
+#  1. 「\n+ → 「 (开引号后换行: 删)
+#  2. \n+」 → 」 (闭引号前换行: 删)
+#  3. 」\n\n+」 → 」」 (多空行折叠, 防 」 后空行再接 」)
+_RE_OPEN_QUOTE_NEWLINE = re.compile(r"「\s*\n+")
+_RE_NEWLINE_BEFORE_CLOSE = re.compile(r"\n+\s*」")
+_RE_DUPLICATE_CLOSE = re.compile(r"」(\s*\n\s*){2,}」")
+
+
+def _merge_orphan_quotes(text: str) -> str:
+    """合并 「」 孤行 (3 层防护 L2)
+
+    场景示例:
+        反例:
+            她低声说:「我做了一个梦,
+            梦里全是光。
+            」
+        正例:
+            她低声说:「我做了一个梦,
+            梦里全是光。」
+
+    规则:
+        1. 「 后紧跟 1+ 换行 → 删 (开引号后直接接文字)
+        2. 1+ 换行后紧跟 」 → 删 (闭引号前直接接文字)
+        3. 」 与下一个 」 之间多空行 → 折叠 (罕见, 防御)
+        4. 不动: 段首独立引语 (\n\n「 仍保留; 不破坏段落结构)
+
+    Args:
+        text: 已 normalize_cn_punctuation 的文本
+
+    Returns:
+        合并后的文本
+    """
+    if not text:
+        return text
+    # 1. 开引号后换行 → 删
+    text = _RE_OPEN_QUOTE_NEWLINE.sub("「", text)
+    # 2. 闭引号前换行 → 删
+    text = _RE_NEWLINE_BEFORE_CLOSE.sub("」", text)
+    # 3. 」 之间的多空行折叠
+    text = _RE_DUPLICATE_CLOSE.sub("」」", text)
+    return text
