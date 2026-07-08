@@ -113,7 +113,8 @@ def test_logrotate_dry_run() -> None:
     combined = result.stdout + result.stderr
     # 只检查语法错误 (config 路径找不到 / parse 错), 跳过环境 / 权限类
     syntax_errors = [
-        line for line in combined.splitlines()
+        line
+        for line in combined.splitlines()
         if "error:" in line.lower()
         and "permission denied" not in line.lower()
         and "stat of" not in line.lower()
