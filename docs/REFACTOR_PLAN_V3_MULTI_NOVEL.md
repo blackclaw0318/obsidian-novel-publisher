@@ -2,11 +2,15 @@
 
 > **作者**: 黑 (Hei)
 > **日期**: 2026-07-08
-> **状态**: ⏸️ 等老板拍 Q1-Q6 后启动 P0
-> **背景**: 老板 7-8 09:40 提出 4 大问题, 现有 v0.2 架构 (单本一次性选题 + 硬编码 + 通用封面) 不能满足
-> **目标版本**: v0.3 (大版本, 架构级重构)
-> **估时**: 5 工作日
-> **核心变化**: 单本一次性 → 多本并行 · 一次性选题 → 老板审过大纲后开写 · 通用封面 prompt → 风格指南驱动
+> **状态**: ⏸️ v0.3.2 草稿, 等老板拍 Q1-Q14 后启动 P0
+> **背景**: 老板 7-8 09:40 提出 4 大问题, 11:24 补充 2 点, 15:36 拍板 5 修正 (本版)
+> **目标版本**: v0.3.2 (大版本, 架构级重构)
+> **估时**: 7.5 工作日
+> **核心变化**:
+> - 单本一次性 → **每本每天 3 章** (3 次 × 1 章/本, N 本全更, 不轮转)
+> - 一次性选题 → 老板审过大纲后开写
+> - 通用封面 prompt → **风格指南 + image-to-image 锁角色**
+> - 老数据清理 → **黑不写清理代码**, 老板自己删
 
 ---
 
@@ -25,10 +29,11 @@
 |---|---|---|
 | 选题 | topic_gen 一次性 M3 脑洞, 无关键词入口 | `novels.yaml` 显式声明每本 + 关键词, M3 按指定方向 |
 | 小说数量 | 单本 `meta_realm_obsidian` 硬编码 | **多本并行**, `novels.yaml` 列表 + `enabled` 开关 |
+| 每日推送量 | (无) | **所有 `enabled=true` 的小说, 每天 8/12/18 三档, 每档每本 1 章 = N 本 × 3 章/天** (老板 15:36 拍, 取代"3 本轮转") |
 | 大纲 | M3 即兴, 不持久化, 不开放修改 | **backups 仓持久化**, 老板在 GitHub PR 修改, publisher 每次拉最新 |
 | 风格指南 | `style_guide` dict 随章节生成, 不固定 | `style_guide.md` 持久化 (含 style_prompt + character_refs + scene_palette) |
-| 人物一致性 | 无机制 | character_refs 固定描述, 跨章复用 |
-| 封面 prompt | M3 即兴, 默认走"通用降级" prompt | style_guide.md 显式 prompt, 老板可改 |
+| 人物一致性 | 无机制 | character_refs 固定描述 + **minimax image-to-image `subject_reference[type=character]`** (拿 ch-(N-1) 封面 URL 作参考, ch-1 仍 text-to-image) |
+| 封面 prompt | M3 即兴, 默认走"通用降级" prompt | style_guide.md 显式 prompt + image-to-image 锁角色, 老板可改 |
 | 排版 | `text_punct.py` 标点规范化, **未处理单字符行** | **加 `_merge_orphan_quotes`** + prompt 强化 |
 | state | 单 `data/state.json` 全局一份 | **按 novel_id 拆分** `data/state/{novel_id}.json` |
 | backups 推送 | 已实现 (P3) | **扩展**: outline/style_guide/characters 也推 + 开新书审核流 |
@@ -82,9 +87,12 @@ novels:
     created_at: 2026-07-08T00:00:00Z
 
 # 推送时间窗 (systemd timer 配置, 这里只声明 publisher 期望节奏)
+# 老板 15:36 拍: 每天 8/12/18 三档, 每档"每本都写 1 章",不是"3 本轮转"
 schedule:
-  hours: [8, 12, 18]  # 每天 3 次
-  per_run_novel_limit: 1  # 每次 run_once 写 1 章 (1 本) — 不堆压 LLM
+  hours: [8, 12, 18]                       # 每天 3 次, 与 systemd timer 配合
+  per_run_novel_limit: null               # 一次 run_once 写"所有 enabled" 小说 (取代 v0.2 的"单本轮转")
+  daily_chapter_target: 3                 # 每本每天目标章数 (8/12/18 各 1 章)
+  # 实际 N 本 × 3 章/天 = 3N 章/天, 老板可按本调整 daily_chapter (true/false)
 ```
 
 ### 2.2 backups 仓 `blackclaw0318/obsidian-novel-backups` 新结构
@@ -187,7 +195,9 @@ publisher run_once
   │   │     - last_pushed_idx = 3
   │   │
   │   ├─ 4. 检查 novel.daily_chapter & 配额
-  │   │     (每 8h 一次, 一本一天 1 章 — 防 publisher 跑飞)
+  │   │     (老板 15:36 拍: 每本每天 3 章, 8/12/18 三档各 1 章)
+  │   │     (取代 v0.2 的"1 本轮转 3 次 = 3 本各 1 章")
+  │   │     (现在 N 本 × 3 章/天 = 3N 章/天, 由 systemd timer 24h 控频)
   │   │
   │   ├─ 5. M3 写章节 (prompt 注入)
   │   │     user.txt 模板新增字段:
@@ -262,7 +272,7 @@ def create_novel_draft(
 - `src/publisher.py`: `run_once` 改 loop, 单本失败不阻塞其他
 
 **老板拍 Q2-Q3**:
-- Q2: 一次 run_once 写 N 本 vs 1 本? (黑推荐 **每 8h 写 1 章, 3 次/天可切 3 本** — 详见 Q5)
+- Q2: **每本每天写几章?** (老板 15:36 拍: 每本每天 3 章, 8/12/18 三档各 1 章 — 详见 §17 Q2)
 - Q3: 老板在 GitHub 直接 commit 改 outline 后, publisher 是否需要通知"已采用你的修改"? (黑推荐**不通知**, state.sha 记录 + 日报里显示)
 
 ### 4.3 问题 3: 封面风格多样 + 人物一致
@@ -333,7 +343,165 @@ def compose_chapter_cover_prompt(
 
 **老板拍 Q4-Q5**:
 - Q4: style_guide.md 老板改后, publisher 检测到 outline/style_guide 矛盾时 (e.g. style 写"水墨", outline 写"赛博朋克") 怎么办? (黑推荐**log warning 继续跑, 不阻断** — 老板审美是 source of truth)
-- Q5: 人物一致性用 prompt 描述 vs image-01 image reference? (黑推荐**先用 prompt 描述, 后续若 image-01 支持 image-2-image 引用固定角色再升级**)
+- Q5: 人物一致性用 prompt 描述 vs image-01 image-2-image? (黑推荐**两者都要** — 详见 §4.5)
+
+### 4.5 问题 3 升级: image-to-image 锁角色 (老板 15:36 拍)
+
+> **老板原话**: "参考 minimax api 使用文档 https://platform.minimaxi.com/docs/guides/image-generation, 其中有以图生图的功能 (标题为结合参考图生成图片), 这样应该更能保证主角图片的一致性"
+
+#### 4.5.1 minimax image-to-image 能力勘察 (7-8 16:00)
+
+**API 端点**: `POST https://api.minimaxi.com/v1/image_generation` (与 text-to-image **同一个端点**)
+
+**关键 payload 字段**:
+```python
+payload = {
+    "model": "image-01",
+    "prompt": "女孩在图书馆的窗户前，看向远方",       # 场景描述 (中文 OK)
+    "aspect_ratio": "16:9",
+    "subject_reference": [
+        {
+            "type": "character",                       # 固定为 "character" (官方支持值)
+            "image_file": "https://cdn.xxx.com/xxx.jpg"  # 必须是 minimax 可访问的 URL
+        }
+    ],
+    "response_format": "base64",
+}
+```
+
+**官方说明** (原话引用):
+- "提供一张包含清晰主体的参考图 (支持网络图片链接), 并结合 prompt 描述, 生成一张保留了主体特征的新图片"
+- "当前每次请求仅支持传入一张参考图"
+- "该功能尤其适用于需要保持人物形象一致性的场景, 例如为同一个虚拟角色生成不同情境下的图片"
+
+#### 4.5.2 v0.3.2 方案: ch-2 起启用 image-to-image
+
+**核心机制**:
+- ch-1 走 text-to-image (没参考图)
+- ch-2+ 拿 ch-(N-1) 的 **obsidian-journal 公网 URL** 作为 `subject_reference.image_file`
+- prompt + subject_reference 双保险, 跨章主角 "近似一致" (80-90% 像, 接受细节漂移)
+
+**URL 必须满足**:
+- ✅ minimax 服务端可访问 (即 obsidian-journal 上传的封面 `https://www.shangkun.uk/uploads/{hash}.jpg` 满足)
+- ❌ 本地路径 / file:// / localhost:3000 (minimax 不会访问到)
+
+**publisher 改造点**:
+
+```python
+# src/cover_gen.py — 加 image-to-image 分支
+def generate_cover(
+    *,
+    chapter_idx: int,                # 1, 2, 3, ...
+    chapter_scene: str,               # 本章场景描述
+    style_guide: StyleGuide,          # 从 backups 拉
+    characters: Characters,           # 从 backups 拉
+    novel: Novel,                     # 小说配置 (拿 novel.slug)
+) -> bytes:
+    """生成 ch-N 封面。
+
+    - ch-1 走 text-to-image (无参考图)
+    - ch-2+ 拿 ch-(N-1) 的 obsidian-journal 公网 URL 作 subject_reference
+    """
+    prompt = compose_chapter_cover_prompt(
+        chapter_idx=chapter_idx,
+        chapter_scene=chapter_scene,
+        style_guide=style_guide,
+        characters=characters,
+    )
+
+    payload = {
+        "model": "image-01",
+        "prompt": prompt,
+        "aspect_ratio": "3:4",  # 封面 3:4
+        "response_format": "base64",
+    }
+
+    # 老板 15:36 拍: ch-2 起启用 image-to-image
+    if chapter_idx >= 2:
+        prev_chapter_url = _fetch_prev_chapter_cover_url(novel, chapter_idx - 1)
+        if prev_chapter_url:
+            payload["subject_reference"] = [
+                {
+                    "type": "character",
+                    "image_file": prev_chapter_url,  # minimax 可访问
+                }
+            ]
+            log.info(f"ch-{chapter_idx:03d} 启用 image-to-image, 参考图: {prev_chapter_url}")
+        else:
+            log.warning(f"ch-{chapter_idx:03d} 拿不到 ch-{(chapter_idx-1):03d} 公网 URL, 退回 text-to-image")
+
+    response = requests.post(
+        "https://api.minimaxi.com/v1/image_generation",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json=payload,
+        timeout=(10, 60),
+    )
+    response.raise_for_status()
+    return base64.b64decode(response.json()["data"]["image_base64"][0])
+
+
+def _fetch_prev_chapter_cover_url(novel: Novel, prev_idx: int) -> str | None:
+    """拿 ch-{prev_idx:03d} 的 obsidian-journal 公网 URL"""
+    # 1. 查 state.json last_pushed_url
+    state = load_state(novel.id)
+    last_url = state.chapter_urls.get(f"ch-{prev_idx:03d}")
+    if last_url:
+        return last_url  # e.g. "https://www.shangkun.uk/uploads/83e4c96b082ebe88.jpg"
+    # 2. fallback: 推完时記在 state 的 chapter_urls map
+    return None
+```
+
+**新 Prompt 调整** (assets/prompts/cover_user.txt 新增):
+```
+【章封面生成指令 (7-8 升级)】
+- ch-1 走 text-to-image, 只靠 prompt 描述
+- ch-2+ 走 image-to-image, subject_reference = ch-(N-1) 封面 URL
+  → minimax 会保留上一张的主体特征, 但允许场景/镜头/动作变化
+- prompt 仍需包含完整的 {char_main_description} (防止 subject_reference 不到位时纯 prompt 仍可工作)
+- prompt 严禁 "换发色 / 换衣服 / 换年龄" 等与 char_refs 矛盾的描述
+- prompt 优先描述"场景 + 动作 + 镜头", 人物外貌复述不超 1 句
+```
+
+**测试** (tests/integration/cover_image_to_image.test.py):
+```python
+def test_ch1_uses_text_to_image():
+    payload = build_payload(novel, chapter_idx=1, scene="...", style=..., chars=...)
+    assert "subject_reference" not in payload
+
+def test_ch2_uses_subject_reference_with_ch1_url():
+    novel = make_novel_with_pushed_ch1(cover_url="https://www.shangkun.uk/uploads/abc.jpg")
+    payload = build_payload(novel, chapter_idx=2, scene="...", style=..., chars=...)
+    assert payload["subject_reference"][0]["type"] == "character"
+    assert payload["subject_reference"][0]["image_file"] == "https://www.shangkun.uk/uploads/abc.jpg"
+
+def test_ch2_fallback_when_no_prev_url():
+    novel = make_novel_no_prev_chapter()  # 老 slug 重启场景
+    payload = build_payload(novel, chapter_idx=2, scene="...", style=..., chars=...)
+    assert "subject_reference" not in payload  # fallback
+    log.warning 触发
+
+def test_ch1_url_must_be_minimax_accessible():
+    """防本地 URL 被错传"""
+    novel = make_novel_with_prev_url("http://localhost:3000/uploads/x.jpg")  # 不可访问
+    payload = build_payload(novel, chapter_idx=2, scene="...", style=..., chars=...)
+    # 业务上 publisher 不会用本地 URL, 这里只验证 schema 校验
+    # (实际 minimax 会返 400, 启动时检测 URL 是 http://localhost 则降级)
+```
+
+#### 4.5.3 风险与边界
+
+| 风险 | 概率 | 影响 | 缓解 |
+|---|---|---|---|
+| minimax subject_reference 一致性 < 100% | 🟡 中 | 细节漂 (发型/服装) | prompt 锁词 + 接受 "近似一致" 80-90% |
+| ch-1 没参考图 | 🟢 已规避 | 走 text-to-image | ch-2 起才启用 |
+| 老数据 ch-1 不可访问 (URL 改) | 🟢 低 | ch-2 fallback text-to-image | `_fetch_prev_chapter_cover_url` 返 None 时降级 + log |
+| minimax subject_reference 1 张/次限制 | 🟢 已规避 | 只能参考 1 个主体 | 我们只需锁主角 1 人, 配角 接受漂移 |
+| minimax 访问不到 obsidian-journal (CF 边缘 5xx) | 🟢 低 | 生成失败 | catch exception + fallback text-to-image + 告警 |
+| 风格 / 场景变化时, 主角还是上一张的"动作" | 🟡 中 | ch-N 主角姿势 = ch-(N-1) 姿势 | prompt 强调"new scene / new action", 告诉 minimax 要变 |
+
+#### 4.5.4 老板拍 Q13
+
+- Q13: image-to-image 启用起点? 用 / 不用 / 只 ch-2 起? (黑推荐**ch-2 起启用**, ch-1 仍 text-to-image)
 
 ### 4.4 问题 4: 「」 排版
 
@@ -433,12 +601,13 @@ def test_quote_with_internal_newline():
 | `src/publisher.py` | `run_once` 改 loop 多本 + 错误隔离 + 配额 | +60 |
 | `src/topic_gen.py` | 加 `create_novel_draft()` 开新书 | +120 |
 | `src/github_backup.py` | 加 `upload_outline` / `upload_style_guide` / `upload_characters` / `upload_chapter` | +150 |
-| `src/cover_gen.py` | `compose_chapter_cover_prompt()` 注入 style_guide | +30 |
+| `src/cover_gen.py` | `compose_chapter_cover_prompt()` 注入 style_guide + **image-to-image 主体参考** | +50 |
 | `src/text_punct.py` | 加 `_merge_orphan_quotes()` | +30 |
 | `src/markdown_renderer.py` | 渲染前过 `_merge_orphan_quotes` 兜底 | +10 |
 | `assets/prompts/system.txt` | 排版铁律 + 人物一致性约束 | +30 |
 | `assets/prompts/user.txt` | 模板字段 {outline} {characters} {style_guide} {prev_chapter_summary} | +20 |
 | `assets/prompts/topic_user.txt` | 关键词驱动 + 风格偏好 | +15 |
+| `assets/prompts/cover_user.txt` | **章封面 prompt (ch-1 text-to-image + ch-2+ image-to-image 双路径)** | +30 |
 
 ### 5.3 backups 仓初始化 (1 commit)
 
@@ -454,25 +623,31 @@ def test_quote_with_internal_newline():
 
 ---
 
-## 6. 实施步骤 (估时 5d)
+## 6. 实施步骤 (估时 7.5d, 含 v0.3.2 增量)
 
 | 阶段 | 内容 | 估时 | 累计 |
 |---|---|---|---|
 | **P0** | novels.yaml + novel_registry + state 拆分 + backups README | 1d | 1d |
-| **P1** | novel_outline + style_guide + characters 拉取/缓存 | 1d | 2d |
-| **P2** | publisher.run_once 改 loop 多本 + 错误隔离 | 0.5d | 2.5d |
-| **P3** | cover_prompt_builder + style_guide 驱动 + 人物一致性 | 0.5d | 3d |
-| **P4** | text_punct 排版修复 + prompt 强化 + 测试 | 0.3d | 3.3d |
-| **P5** | 集成测试 + 真 dry-run + 推 GitHub + 文档 | 1d | 4.3d |
-| **P6** | (可选) 接入 systemd timer 多本错峰 | 0.7d | 5d |
+| **P0.5** | 3-tier 完整化 (v0.3.1 增量) | 1d | 2d |
+| **P1** | novel_outline + style_guide + characters 拉取/缓存 | 1d | 3d |
+| **P2** | publisher.run_once 改 loop 多本 + 错误隔离 | 0.5d | 3.5d |
+| **P2.5** | **image-to-image 集成 (v0.3.2 新增)** | 0.5d | 4d |
+| **P3** | cover_prompt_builder + style_guide 驱动 + 人物一致性 | 0.5d | 4.5d |
+| **P4** | text_punct 排版修复 + prompt 强化 + 测试 | 0.3d | 4.8d |
+| **P5** | 集成测试 + 真 dry-run + 推 GitHub + 文档 | 1d | 5.8d |
+| **P5.5** | obsidian-journal 版权声明 (v0.3.2 简化) | 1.5d | 7.3d |
+| **P7** | admin 版权设置 UI + /copyright 页面 (v0.3.2 收尾) | 0.5d | 7.8d |
 
 **关键里程碑**:
 - P0 完: 能用 `python -m src.novel_registry` 列出 2 本
 - P1 完: 能用 `python -m src.novel_outline fetch --novel meta_realm_obsidian` 拉大纲
-- P2 完: `python -m src.publisher run-once --all` 串行写 2 本
+- P2 完: `python -m src.publisher run-once --all` 串行写 N 本, 每本 1 章
+- P2.5 完: ch-2+ 封面调用 minimax image-to-image 接口, ch-1 仍 text-to-image
 - P3 完: 不同小说 prompt 输出风格可区分 (人工验)
 - P4 完: `text_punct_orphan_quotes` 测试 100% 过
 - P5 完: 推 GitHub + dry-run PASS + 老板拍可上 prod
+- P5.5 完: Footer + ArticleCopyright + /copyright 页都 渲染 "© 2026 上坤"
+- P7 完: admin 可改 copyright_holder, /copyright 页 Markdown 可编辑
 
 ---
 
@@ -728,16 +903,15 @@ def current_volume(novel: Novel, chapter_idx: int) -> Volume:
 - 老 3 章保留 (ch-001/2/3 还在 DB), 与新 slug 并存
 - state 推进不依赖 slug, 只用 chapter_idx 数字
 
-**残留数据清理** (一次性 SQL):
-```sql
--- 删除空 novel + 空 volume (老板拍 Q8 后执行)
-DELETE FROM novel_volumes WHERE novel_id IN (SELECT id FROM novels WHERE description IS NULL);
-DELETE FROM novels WHERE description IS NULL;
-```
+**残留数据清理**:
+- **老板自己手工删** (2026-07-08 11:50 拍: 元界 + 残留空 novel 都由老板手动删)
+- 黑不写 SQL 清理逻辑, 不动老数据
 
 ---
 
-## 14. 补充点 2: 网站版权 + 文章内容版权
+## 14. 补充点 2: 网站版权 + 文章内容版权 (v0.3.2 简化版)
+
+> **7-8 11:50 老板拍板**: 只要 "版权持有人 = 上坤", 不要任何协议 (CC / BY-SA / All Rights Reserved 等都不要)。 简单粗暴。
 
 ### 14.1 现状 (勘察)
 
@@ -758,20 +932,16 @@ DELETE FROM novels WHERE description IS NULL;
 site_config: site_name, site_tagline, site_description, site_keywords, default_theme,
              allow_custom_html, baidu_push_enabled, baidu_push_token, og_image, favicon, analytics
 ```
-- **没有 license 字段**
-- **没有 copyright_holder 字段**
+- **没有 copyright_holder 字段** (其他 license 也不加, 只加一个 holder)
 
-### 14.2 方案: 3 层版权声明
+### 14.2 v0.3.2 简化方案: 只声明 "© 上坤", 不加任何协议
 
-#### 14.2.1 Schema 加 4 字段 (DB migration)
+#### 14.2.1 Schema 只加 1 字段 (DB migration)
 
 ```sql
--- ALTER TABLE site_config 加 4 字段
-ALTER TABLE site_config ADD COLUMN site_license TEXT NOT NULL DEFAULT 'CC BY-NC-SA 4.0';
-ALTER TABLE site_config ADD COLUMN site_license_url TEXT NOT NULL DEFAULT 'https://creativecommons.org/licenses/by-nc-sa/4.0/';
+-- ALTER TABLE site_config 只加 1 字段: copyright_holder
+-- 7-8 老板决策: 不要 license 协议, 只声明版权人
 ALTER TABLE site_config ADD COLUMN copyright_holder TEXT NOT NULL DEFAULT '上坤';
-ALTER TABLE site_config ADD COLUMN aigc_disclosure INTEGER NOT NULL DEFAULT 1;
--- 0 = 不标, 1 = 自动标 AIGC
 ```
 
 #### 14.2.2 Layer 1 — Footer (整站版权)
@@ -779,55 +949,40 @@ ALTER TABLE site_config ADD COLUMN aigc_disclosure INTEGER NOT NULL DEFAULT 1;
 **新 Footer** (`components/Footer.tsx`):
 ```tsx
 const year = new Date().getFullYear();
-const siteLicense = config?.site_license ?? "CC BY-NC-SA 4.0";
-const siteLicenseUrl = config?.site_license_url ?? "https://creativecommons.org/licenses/by-nc-sa/4.0/";
 const copyrightHolder = config?.copyright_holder ?? "上坤";
 
 <p className="text-xs">
-  © {year} {siteName} · Built by 黑 (Hei) · 主题: {defaultTheme}
-</p>
-<p className="text-xs mt-1">
-  本站内容采用{" "}
-  <a href={siteLicenseUrl} target="_blank" rel="noopener noreferrer" className="underline">
-    {siteLicense}
-  </a>{" "}
-  授权 · © {year} {copyrightHolder} · 保留所有权利
+  © {year} {copyrightHolder} · {siteName} · Built by 黑 (Hei) · 主题: {defaultTheme}
   {" · "}
   <Link href="/copyright" className="underline">版权声明</Link>
 </p>
 ```
+
+**渲染示例**: `© 2026 上坤 · 黑曜石日志 · Built by 黑 (Hei) · 主题: light · 版权声明`
 
 #### 14.2.3 Layer 2 — 文章末尾 (单篇版权)
 
 **新组件** `components/ArticleCopyright.tsx`:
 ```tsx
 // 在 posts / chapters / novels 详情页末尾渲染
-export function ArticleCopyright({ type = "post" }: { type?: "post" | "chapter" | "novel" }) {
+export function ArticleCopyright({ type = "post", slug }: { type?: "post" | "chapter" | "novel"; slug?: string }) {
   const config = siteConfigRepo.get();
   const year = new Date().getFullYear();
-  const siteLicense = config?.site_license ?? "CC BY-NC-SA 4.0";
-  const siteLicenseUrl = config?.site_license_url ?? "https://creativecommons.org/licenses/by-nc-sa/4.0/";
   const copyrightHolder = config?.copyright_holder ?? "上坤";
-  const aigcEnabled = config?.aigc_disclosure ?? 1;
   
   return (
     <div className="mt-12 pt-6 border-t border-border text-xs text-fg-muted space-y-2">
-      {aigcEnabled === 1 && (
-        <p>
-          ⚠️ <strong>AI 辅助生成声明</strong>: 本文/本章由 AI (minimax M3 + image-01) 辅助生成,
-          人工审核后发布。内容不代表 100% 事实, 仅供参考。
-        </p>
-      )}
       <p>
-        版权: © {year} {copyrightHolder} · 采用{" "}
-        <a href={siteLicenseUrl} target="_blank" rel="noopener noreferrer" className="underline">
-          {siteLicense}
-        </a>{" "}
-        授权 · 转载需注明出处
+        版权: © {year} {copyrightHolder} · 保留所有权利 · 未经授权禁止转载
       </p>
-      {type === "chapter" && (
+      {type === "chapter" && slug && (
         <p>
           永久链接: <Link href={`/chapters/${slug}`} className="underline">/chapters/{slug}</Link>
+        </p>
+      )}
+      {type === "post" && slug && (
+        <p>
+          永久链接: <Link href={`/posts/${slug}`} className="underline">/posts/{slug}</Link>
         </p>
       )}
     </div>
@@ -836,77 +991,68 @@ export function ArticleCopyright({ type = "post" }: { type?: "post" | "chapter" 
 ```
 
 **接入位置**:
-- `app/chapters/[slug]/page.tsx` (v0.38 已存在) — 末尾插 `<ArticleCopyright type="chapter" />`
-- `app/posts/[slug]/page.tsx` (v0.20 已存在) — 末尾插 `<ArticleCopyright type="post" />`
-- `app/novels/[slug]/page.tsx` (v0.38 已存在) — 末尾插 `<ArticleCopyright type="novel" />` (仅 novel 层级)
+- `app/chapters/[slug]/page.tsx` — 末尾插 `<ArticleCopyright type="chapter" slug={slug} />`
+- `app/posts/[slug]/page.tsx` — 末尾插 `<ArticleCopyright type="post" slug={slug} />`
+- `app/novels/[slug]/page.tsx` — 末尾插 `<ArticleCopyright type="novel" slug={slug} />`
 
 #### 14.2.4 Layer 3 — 独立 /copyright 页面 (新)
 
 **新页面** `app/copyright/page.tsx` (v0.39 新增):
-- 整站版权声明
-- 文章内容版权 (CC BY-NC-SA 4.0 全文)
-- AI 生成内容声明 (AIGC disclosure)
-- 免责声明
-- 联系信息 (老板可填)
-- **新导航入口**: Nav 末尾 "版权" 链接
 
-**页面内容** (老板可编辑, 存 SiteConfig):
+老板决定不加协议, 所以 /copyright 页只写:
+- 版权人: © 2026 上坤 · 保留所有权利
+- 适用范围: 整站代码 / UI / 文章 / 小说章节
+- 授权: 未经授权禁止转载 / 改编 / 商业使用
+- 联系: GitHub 链接
+- 最后更新日期
+
+**页面内容** (老板可编辑, 存 SiteConfig Markdown):
 ```markdown
 # 版权声明
 
 最后更新: 2026-07-08
 
-## 1. 整站版权
-本站 (黑曜石日志) 的源代码、UI 设计、原创插图、原创 logo 由 © 2026 上坤 创作,
-采用 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) 授权。
+本站 (黑曜石日志) 的所有内容, 包括但不限于源代码、UI 设计、文章、小说章节、
+插图、Logo, 版权归 © 2026 上坤 所有。
 
-## 2. 文章/章节内容版权
-本站发布的所有文章、小说章节、翻译内容同样采用 CC BY-NC-SA 4.0 授权:
-- **允许**: 转载、引用、改编 (注明出处即可)
-- **不允许**: 商业使用、署名删除
-- **强制**: 转载需保留原作者 (上坤) + 永久链接 + 同样协议
+## 未经授权, 严禁:
+- 转载 / 复制 / 改编任何内容
+- 商业使用任何内容
+- 删除或修改版权声明
 
-## 3. AI 辅助生成声明
-本站小说 (《元界》等) 由 AI (minimax M3 + image-01) 辅助生成, 经人工审核后发布。
-- 故事设定 / 人物 / 大纲: 人工设计
-- 章节正文: AI 写作 + 人工润色
-- 封面图: AI 生成 + 人工挑选
-- 内容不代表 100% 事实, 仅供参考
+## 授权使用
+如需使用本站任何内容, 请提前联系 GitHub: https://github.com/blackclaw0318
 
-## 4. 免责声明
+## 免责声明
 - 本站内容不构成任何投资 / 法律 / 医疗建议
-- AI 生成内容可能存在事实错误, 老板会在评论区更正
+- AI 生成内容可能存在事实错误
 - 引用第三方内容已尽量注明出处, 如有侵权请联系删除
-
-## 5. 联系
-- GitHub: https://github.com/blackclaw0318
-- 邮箱: (待老板填)
 ```
 
-**SiteConfig 升级 (admin UI)**:
-- `app/admin/(admin)/settings/page.tsx` 加 "版权设置" 区块
-  - 整站许可证下拉 (CC BY / CC BY-SA / CC BY-NC / CC BY-NC-SA / All Rights Reserved)
-  - 版权持有人输入框
-  - AIGC 披露开关
-  - /copyright 页面 Markdown 编辑器 (富文本 → 渲染)
+**新导航入口**: Nav 末尾 "版权" 链接 → `/copyright`
 
-### 14.3 估时 (v0.3.1 增量)
+#### 14.2.5 SiteConfig 升级 (admin UI)
+
+`app/admin/(admin)/settings/page.tsx` 加 "版权设置" 区块:
+- **版权持有人**输入框 (默认 "上坤", 老板可改)
+- **/copyright 页 Markdown 编辑器** (admin 端编辑 → 渲染)
+
+### 14.3 v0.3.2 估时 (增量)
 
 | 模块 | 估时 | 备注 |
 |---|---|---|
 | obsidian-novel-publisher 3-tier 完整化 | 1d | P0.5: novels.yaml 升级 + state 加 volume + publisher 改造 |
-| 残留数据清理 (空 novel/volume) | 0.1d | 一次性 SQL + 老 slug 保持 |
-| obsidian-journal SiteConfig schema 扩展 | 0.2d | 4 字段 + ALTER TABLE + 类型 + repo 函数 |
-| Footer 升级 | 0.2d | 整站许可证链接 + 版权声明链接 |
-| ArticleCopyright 组件 | 0.3d | 3 处接入 (chapter / post / novel) |
-| /copyright 新页 | 0.5d | 富文本 + admin 端编辑 + nav 接入 |
-| admin settings UI 升级 | 0.5d | 许可证下拉 + 版权持有人 + AIGC 开关 + Markdown 编辑 |
-| **增量估时** | **2.8d** | + 1d 缓冲 = 3.8d |
+| obsidian-journal SiteConfig schema 加 1 字段 | 0.1d | `copyright_holder` + ALTER TABLE + repo 函数 |
+| Footer 简化升级 | 0.1d | 只加 copyright_holder 显示 + /copyright 链接 |
+| ArticleCopyright 简化组件 | 0.2d | 3 处接入, 不显示 license |
+| /copyright 新页 (简单版) | 0.3d | 静态 Markdown + nav 接入 |
+| admin settings UI 升级 (简化) | 0.3d | 只加版权持有人输入 + Markdown 编辑 |
+| **增量估时** | **2d** | 比 v0.3.1 省 1.8d (移除协议/AIGC 等复杂配置) |
 
-**v0.3 总估时更新**:
-- 原 §6 估时 5d
-- + v0.3.1 增量 3.8d
-- **新总估时: 8.8d ≈ 9d** (老板拍 Q1-Q8 + v0.3.1 Q9 后启动)
+**v0.3.2 总估时**:
+- 原 v0.3 §6 估时 5d
+- + v0.3.2 增量 2d
+- **新总估时: 7d** (老板拍 Q1-Q12 + v0.3.2 Q9-Q11 后启动)
 
 ---
 
@@ -921,9 +1067,10 @@ export function ArticleCopyright({ type = "post" }: { type?: "post" | "chapter" 
 | `src/novel_outline.py` | 180 | 拉 + 缓存 + sha 检测 outline.md | 原 |
 | `src/style_guide.py` | 150 | 拉 + 解析 + 应用 style_guide.md | 原 |
 | `src/state_per_novel.py` | 120 | state 按 novel_id 拆分 (含 volume 追踪) | 原 + v0.3.1 |
-| `src/cover_prompt_builder.py` | 100 | style_guide → chapter cover prompt 组合 | 原 |
+| `src/cover_prompt_builder.py` | 130 | style_guide → chapter cover prompt 组合 + **image-to-image 主体参考** | 原 + v0.3.2 |
 | `tests/integration/multi_novel.test.py` | 200 | 多本并行流测试 | 原 |
 | `tests/integration/text_punct_orphan_quotes.test.py` | 80 | 排版用例 | 原 |
+| `tests/integration/cover_image_to_image.test.py` | 120 | **image-to-image 3 用例 (ch-1 text / ch-2 subject / ch-2 fallback)** | **v0.3.2** |
 | `tests/integration/three_tier_chapter.test.py` | 150 | **3-tier 完整推送测试** | **v0.3.1** |
 | `app/copyright/page.tsx` | 200 | **/copyright 独立页面** | **v0.3.1** |
 | `components/ArticleCopyright.tsx` | 80 | **单篇末尾版权组件** | **v0.3.1** |
@@ -954,54 +1101,76 @@ export function ArticleCopyright({ type = "post" }: { type?: "post" | "chapter" 
 
 ---
 
-## 16. 更新后的实施步骤 (合并 §6 + v0.3.1)
+## 16. 更新后的实施步骤 (合并 §6 + v0.3.1 + v0.3.2)
 
 | 阶段 | 内容 | 估时 | 累计 |
 |---|---|---|---|
 | **P0** | novels.yaml + novel_registry + state 拆分 + backups README | 1d | 1d |
-| **P0.5** | **3-tier 完整化 (v0.3.1 补充)** | 1d | 2d |
+| **P0.5** | 3-tier 完整化 (v0.3.1 增量) | 1d | 2d |
 | **P1** | novel_outline + style_guide + characters 拉取/缓存 | 1d | 3d |
-| **P2** | publisher.run_once 改 loop 多本 + 错误隔离 | 0.5d | 3.5d |
-| **P3** | cover_prompt_builder + style_guide 驱动 + 人物一致性 | 0.5d | 4d |
-| **P4** | text_punct 排版修复 + prompt 强化 + 测试 | 0.3d | 4.3d |
-| **P5** | 集成测试 + 真 dry-run + 推 GitHub + 文档 | 1d | 5.3d |
-| **P5.5** | **obsidian-journal 版权声明 (v0.3.1 补充)** | 2d | 7.3d |
-| **P6** | (可选) 接入 systemd timer 多本错峰 | 0.7d | 8d |
-| **P7** | **admin 版权设置 UI + /copyright 页面 (v0.3.1 收尾)** | 1d | 9d |
+| **P2** | publisher.run_once 改 loop 多本 + 错误隔离 + 配额检查 | 0.5d | 3.5d |
+| **P2.5** | **image-to-image 集成 (v0.3.2 新增, minimax subject_reference)** | 0.5d | 4d |
+| **P3** | cover_prompt_builder + style_guide 驱动 + 人物一致性 | 0.5d | 4.5d |
+| **P4** | text_punct 排版修复 + prompt 强化 + 测试 | 0.3d | 4.8d |
+| **P5** | 集成测试 + 真 dry-run + 推 GitHub + 文档 | 1d | 5.8d |
+| **P5.5** | **obsidian-journal 版权声明 (v0.3.2 简化, 只 1 字段)** | 1.5d | 7.3d |
+| **P7** | **admin 版权设置 UI + /copyright 页面 (v0.3.2 收尾)** | 0.5d | 7.8d |
+
+> **v0.3.2 相比 v0.3.1 减 1d**:
+> - P5.5 从 2d → 1.5d (去 license/AIGC 配置, 只加 1 字段 + 简单组件)
+> - P7 从 1d → 0.5d (admin 只加 1 输入 + Markdown 编辑, 去掉许可证下拉/AIGC 开关)
 
 ---
 
-## 17. 更新后的老板决策清单 (Q1-Q8, 拍后启动 P0)
+## 17. v0.3.2 老板决策清单 (Q1-Q11, 拍后启动 P0)
+
+> **v0.3.2 调整** (2026-07-08 11:50 老板补充 5 点后):
+> - ❌ Q8 (老 slug + 残留清理) **移除** — 老板自己手工删
+> - ❌ Q9 (license 选型) **移除** — 老板决定不要任何协议, 只声明 © 上坤
+> - ❌ Q10 (AIGC 披露) **移除** — 不加任何协议后, AIGC 披露也没意义
+> - ✅ Q11 (/copyright 维护) **保留** — 仍存 SiteConfig Markdown
+> - ✅ Q12 (Footer 显示) **保留** — 简化为只显示 © + 链接
+> - 🆕 **Q13 (image-to-image) 新增** — 用 minimax subject_reference 保主角一致性
+> - 🆕 **Q14 (每本每天几章) 新增** — 老板拍每本每天 3 章, 不轮转
 
 | # | 决策 | 候选 | 黑推荐 |
 |---|---|---|---|
 | **Q1** | novels.yaml 位置 | `repo root` / `config/novels.yaml` / `novels/{id}.yaml` | **repo root** |
-| **Q2** | 一次 run_once 写几本? | 1 本 / N 本 / 单本轮转 | **1 本 (轮转)** |
+| **Q2** | **每本每天写几章?** | 1 章 / 3 章 (8/12/18 三次) / 随时随机 | **3 章** (一天 8/12/18 三次, 每本每次 1 章 — 老板 15:36 拍, 取代"3 本轮转", 实际 N 本 × 3 章/天 = 3N 章/天) |
 | **Q3** | 老板在 GitHub 改 outline 后通知方式? | 不通知 + 日报 / WeCom / PR comment | **不通知 + 日报显示** |
 | **Q4** | style_guide vs outline 矛盾时? | log warning / 抛错 / 静默用 outline | **log warning 继续** |
-| **Q5** | 人物一致性机制? | prompt 描述 / image ref / 两者 | **先 prompt 描述** |
+| **Q5** | **人物一致性机制?** | prompt 描述 / image-to-image (subject_reference) / 两者 | **image-to-image + prompt 锁词** (minimax `subject_reference[type=character]`, 拿前一章封面作参考) |
 | **Q6** | 「」 排版 3 层防护? | 仅后处理 / 仅 prompt / 后处理+prompt+renderer | **3 层全上** |
 | **Q7** | 老的 `truth/` 目录处理? | 保留 1 月归档 / 立即清 / 保留不归档 | **保留 1 月** (.archive) |
-| **Q8** | **老 slug (chapter-1-awakening 等) + 残留空 novel/volume** | **保留 + 手动清 / 一次性 SQL 清 / 不动** | **一次性 SQL 清空 novel, 老 slug 保留** |
-| **Q9** | **整站 license 选哪个?** | CC BY / CC BY-SA / CC BY-NC / CC BY-NC-SA / All Rights Reserved | **CC BY-NC-SA 4.0** (博客最常用, 商业留余地) |
-| **Q10** | **AIGC 披露开关默认?** | 默认开 / 默认关 | **默认开** (合规友好, 老板可关) |
-| **Q11** | **/copyright 页面内容维护方式?** | 硬编码 TSX / 存 SiteConfig Markdown / 用 pages 表 (Block 编辑器) | **存 SiteConfig Markdown** (admin 可编辑, 与 pages 隔离) |
-| **Q12** | **Footer 版权声明显示方式?** | 简版 (1 行) / 完整 (含链接) | **完整版** (含许可证链接 + /copyright 链接) |
+| **Q8** | ~~老 slug + 残留清理~~ | ~~老板自删, 黑不写代码~~ | **不写清理逻辑** (老板拍: 自己删元界 + 残留) |
+| **Q9** | ~~整站 license 选型~~ | ~~不要任何协议~~ | **不设 license 字段** (老板拍: 只声明 © 上坤, 未经授权禁止转载) |
+| **Q10** | ~~AIGC 披露~~ | ~~不要 AIGC 声明~~ | **不做 AIGC 披露** (老板没明示, 默认不加) |
+| **Q11** | **/copyright 页内容维护?** | 硬编码 TSX / 存 SiteConfig Markdown / 用 pages 表 | **存 SiteConfig Markdown** (admin 可编辑) |
+| **Q12** | **Footer 版权显示?** | 简版 / 完整 (含许可证链接) / 完整 (含 /copyright 链接) | **简版 + /copyright 链接** (无 license 字段, 只 © holder) |
+| **Q13** | **image-to-image 启用?** (新) | 用 / 不用 / 只 ch-2 起 | **ch-2 起启用** (ch-1 仍 text-to-image, ch-2+ 用 ch-(N-1) 封面作 subject_reference) |
+| **Q14** | **新测试小说命名?** (新) | 老板拍 | **等老板拍** (老板手动加 novels.yaml 一条新小说, push 后 publisher 自动写 — 后续元界由老板手工删) |
 
-### 17.1 新增引用
+### 17.1 v0.3.2 关键调整 (老板 7-8 11:50 拍板)
 
-- 老板 2 个补充点: 2026-07-08 11:24 webchat
-- 页面勘察: https://www.shangkun.uk/novels + https://www.shangkun.uk/novels/meta-realm (7-8 11:25)
-- DB 实证: `projects/obsidian-journal/data/dev.db` 查 novels/volumes/chapters (7-8 11:25)
-- 残留空 novel: `novel_d015ochhmrauz1ez` (0 chapter, 需 Q8 决定清不清)
-- slug 不一致: ch-001=`chapter-1-awakening`, ch-002=`chapter-2-realm`, ch-003=`meta-realm-ch003` (v0.3.1 统一新规范)
+| 老板决策 | v0.3.1 旧方案 | v0.3.2 新方案 | 原因 |
+|---|---|---|---|
+| 1) 所有启用小说**每天都各写 3 章** | "单本轮转, 一天 3 次 = 3 本轮流" | **一天 3 次 × N 本 = 3N 章/天**, 每本每次 1 章 | 老板明确要求 "每本每天都更新, 每本都更新三章" |
+| 2) 主角一致性用 **image-to-image** | prompt 文字描述锁词 (近似) | **minimax `subject_reference[type=character, image_file=URL]`** (拿前一章封面作参考) | 老板提供 API 文档, 用官方支持的能力 |
+| 3) 版权只声明 **"© 上坤"** | CC BY-NC-SA 4.0 + AIGC 披露 + 4 字段 schema | **只加 `copyright_holder` 1 字段**, 不要任何协议 | 老板明确说"不要加别的协议" |
+| 4) 老 slug + 残留清理**不做** | SQL 一次性清理 | **不写清理逻辑**, 老板手工删 | 老板说"自己删老的数据" |
+| 5) **新开一本测试**, 元界由老板手工删 | publisher 不需要"开新书"流程, 默认用 novels.yaml | **老板手动加 novels.yaml 一条 enabled=true 的新小说, push 后 publisher 自动写** | 简化, 不需要 publisher 帮你开书 |
+| 6) **每本 daily_chapter 默认 = true** | novels.yaml 需显式 daily_chapter: true 才能写 | **默认 true** (简化配置) | 老板要求"所有启用为是的每天都更新" |
 
-### 17.2 风险 (v0.3.1 新增)
+### 17.2 v0.3.2 风险
 
 | 风险 | 概率 | 影响 | 缓解 |
 |---|---|---|---|
-| 老 slug 重命名破坏 SEO / 外链 | 🟡 中 | 老链接 404 | **不重命名**, 新推走规范 slug, 老 3 章保留 |
-| 残留空 novel 还在 DB | 🟢 低 | UI 显示空 card | Q8 一次性 SQL 清 |
+| 老 slug 重命名破坏 SEO / 外链 | 🟢 已规避 | — | **不重命名**, 新推走规范 slug, 老 3 章保留 |
+| 残留空 novel 还在 DB | 🟢 老板自删 | — | 黑不写代码, 老板手动 SQL 删 |
+| N 本 × 3 章/天 LLM 成本爆 | 🟡 中 | 老板感受账单 | novels.yaml 加 `daily_chapter_target` 限速; Q14 老板拍具体数值 |
+| image-to-image 不支持本地参考图 | 🟡 中 | chapter-1 没有参考图 | Q13 黑推荐: **ch-2 起启用**, ch-1 仍 text-to-image, ch-2+ 用 ch-(N-1) 封面 (已上传到 obsidian-journal, URL 可访问) |
+| minimax subject_reference 一致性不完美 | 🟡 中 | 人物 80-90% 像, 细节可能漂 | prompt 锁词 + subject_reference 双保险; 接受"近似一致" |
+| 新测试小说 slug 撞名 | 🟢 低 | 404 | novels.yaml slug 唯一性校验启动时报错 |
 | CC BY-NC-SA 4.0 商业限制 | 🟡 中 | 老板未来想做付费内容受限 | Q9 拍板前想清; 后期可换 CC BY |
 | AIGC 披露影响 SEO / 流量 | 🟡 中 | 平台对 AI 内容流量降权 | Q10 拍板; 可关 |
 | /copyright 页面没人看 | 🟢 低 | 形式主义 | Footer 强制链接 + admin 提醒 |
@@ -1012,8 +1181,9 @@ export function ArticleCopyright({ type = "post" }: { type?: "post" | "chapter" 
 
 | 版本 | 日期 | 老板决策 | 状态 |
 |---|---|---|---|
-| v0.3 | 2026-07-08 10:50 | 老板提 4 大问题 | ⏸️ 等拍 Q1-Q7 |
-| **v0.3.1** | 2026-07-08 11:25 | 老板补充 2 点 (3-tier 完整 + 版权) | ⏸️ 等拍 Q1-Q12 |
+| v0.3 | 2026-07-08 10:50 | 老板提 4 大问题 | ⏸️ 被 v0.3.2 取代 |
+| v0.3.1 | 2026-07-08 11:25 | 老板补充 2 点 (3-tier 完整 + 版权) | ⏸️ 被 v0.3.2 取代 |
+| **v0.3.2** | **2026-07-08 16:00** | **老板拍板 5 修正 (每本每天 3 章 + image-to-image + 版权简化 + 老数据不动 + 新开测试)** | **⏸️ 等拍 Q1-Q14** |
 
 ---
 
@@ -1021,6 +1191,7 @@ export function ArticleCopyright({ type = "post" }: { type?: "post" | "chapter" 
 
 - 老板 4 大问题: 2026-07-08 09:40 webchat
 - 老板 2 补充点: 2026-07-08 11:24 webchat
+- **老板 5 修正**: 2026-07-08 15:36 webchat (v0.3.2 核心)
 - 现状勘察: `src/{publisher,topic_gen,state,text_punct}.py` + `assets/prompts/*.txt` (7-8 10:50)
 - 页面勘察: https://www.shangkun.uk/novels + https://www.shangkun.uk/novels/meta-realm (7-8 11:25)
 - DB 实证: `projects/obsidian-journal/data/dev.db` 查 novels/volumes/chapters (7-8 11:25)
@@ -1028,3 +1199,4 @@ export function ArticleCopyright({ type = "post" }: { type?: "post" | "chapter" 
 - SiteConfig schema: `projects/obsidian-journal/lib/db.ts` + `lib/repo.ts` (7-8 11:26)
 - 上一份方案: `docs/PLAN_NOVEL_AUTHOR_UNIFY.md` (v3 实证完成, 不冲突)
 - 老 3 章数据: `data/state.json` (next_idx=4, last_pushed_idx=3)
+- **minimax image-to-image 文档**: https://platform.minimaxi.com/docs/guides/image-generation (7-8 16:00 老板提供)
