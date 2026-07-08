@@ -72,7 +72,14 @@ class TestMockObsidian:
         with obs.patch():
             resp = requests.post(
                 "https://obs.example.com/api/external/chapters",
-                json={"chapter_slug": "test", "novel_slug": "n", "volume_title": "v", "chapter_title": "t", "chapter_content": "c", "external_id": "e1"},
+                json={
+                    "chapter_slug": "test",
+                    "novel_slug": "n",
+                    "volume_title": "v",
+                    "chapter_title": "t",
+                    "chapter_content": "c",
+                    "external_id": "e1",
+                },
             )
         assert resp.status_code == 201
         assert obs.chapters_received[0]["kwargs"]["json"]["chapter_slug"] == "test"

@@ -83,7 +83,14 @@ def _setup_full_mocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         post_calls.append({"url": url, "body": body, "headers": sig_headers})
         # 2026-07-08: 推 /api/external/chapters (3-tier) 后返回 chapter 字段
         chapter_slug = body.get("chapter_slug", "test-ch")
-        return {"ok": True, "chapter": {"id": "ch_mock_001", "slug": chapter_slug, "url": f"https://obs.example.com/chapters/{chapter_slug}"}}
+        return {
+            "ok": True,
+            "chapter": {
+                "id": "ch_mock_001",
+                "slug": chapter_slug,
+                "url": f"https://obs.example.com/chapters/{chapter_slug}",
+            },
+        }
 
     monkeypatch.setattr("src.publisher._post_with_sig", fake_post)
 

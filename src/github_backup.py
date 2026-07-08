@@ -471,7 +471,9 @@ class GithubBackup:
                     path,
                     len(content_bytes),
                 )
-                resp = requests.put(url, headers=self._headers(), json=body, timeout=(10, self.timeout_s))
+                resp = requests.put(
+                    url, headers=self._headers(), json=body, timeout=(10, self.timeout_s)
+                )
 
                 # 4xx: 参数错, 立即抛
                 if 400 <= resp.status_code < 500:

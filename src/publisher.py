@@ -200,7 +200,9 @@ def _resolve_hard_timeout(override: float | None) -> float:
         try:
             return float(raw)
         except ValueError:
-            logger.warning("PUBLISH_HARD_TIMEOUT_S 非法值 %r, 用默认 %ds", raw, DEFAULT_HARD_TIMEOUT_S)
+            logger.warning(
+                "PUBLISH_HARD_TIMEOUT_S 非法值 %r, 用默认 %ds", raw, DEFAULT_HARD_TIMEOUT_S
+            )
     return float(DEFAULT_HARD_TIMEOUT_S)
 
 
@@ -393,7 +395,9 @@ def run_once(
                     backup_result.commit_sha[:12],
                     len(backup_result.pushed_files),
                 )
-            except Exception as e:  # noqa: BLE001 备份阶段任何异常都不能阻主推送 (含 pydantic/网络/JSON)
+            except (
+                Exception
+            ) as e:  # noqa: BLE001 备份阶段任何异常都不能阻主推送 (含 pydantic/网络/JSON)
                 logger.warning(
                     "[%d] GitHub 备份失败 (主推送仍成功): %s: %s",
                     idx,
@@ -430,7 +434,9 @@ def run_once(
         _cancel_hard_timeout(_old_alarm)
 
 
-def _post_with_sig(url: str, body: dict, sig_headers: dict[str, str], *, raw_body: str | None = None) -> dict:
+def _post_with_sig(
+    url: str, body: dict, sig_headers: dict[str, str], *, raw_body: str | None = None
+) -> dict:
     """POST 到博客 + 验签 + 解析响应
 
     Args:

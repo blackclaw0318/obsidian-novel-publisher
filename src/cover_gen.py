@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import pathlib
@@ -94,16 +95,16 @@ class CoverGenerator:
                 # 7-7 fix: 区分错误信息, 不再误导说 "size < 50000"
                 actual_size = out_path.stat().st_size if out_path.exists() else 0
                 if actual_size < self.MIN_SIZE_BYTES:
-                    raise CoverGenError(f"封面图过小 (size={actual_size} < {self.MIN_SIZE_BYTES}), 视为无效")
+                    raise CoverGenError(
+                        f"封面图过小 (size={actual_size} < {self.MIN_SIZE_BYTES}), 视为无效"
+                    )
                 else:
                     raise CoverGenError(f"封面图 PIL 校验失败 (size={actual_size}), 视为无效")
             except Exception as e:
                 last_err = e
                 # 清除上一轮残文件
-                try:
+                with contextlib.suppress(Exception):
                     (self.output_dir / f"{chapter_idx:03d}.jpg").unlink(missing_ok=True)
-                except Exception:
-                    pass
                 logger.warning(f"[CoverGen] 第 {attempt} 次失败: {e}")
                 if attempt < self.MAX_RETRIES:
                     time.sleep(self.RETRY_DELAY * attempt)

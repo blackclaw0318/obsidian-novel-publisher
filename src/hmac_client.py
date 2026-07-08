@@ -60,7 +60,13 @@ def canonical_body(body: dict[str, Any]) -> str:
     return json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def compute_signature(secret: str, timestamp_ms: int, body: dict[str, Any] | None = None, *, body_bytes: str | None = None) -> str:
+def compute_signature(
+    secret: str,
+    timestamp_ms: int,
+    body: dict[str, Any] | None = None,
+    *,
+    body_bytes: str | None = None,
+) -> str:
     """计算 HMAC-SHA256 hexdigest
 
     二选一: body (dict, 会 canonical 化) 或 body_bytes (str, 原样签名)。

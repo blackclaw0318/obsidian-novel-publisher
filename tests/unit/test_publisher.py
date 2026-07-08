@@ -204,7 +204,10 @@ class TestRunOnceFailure:
                         assert result.last_status == "success"
                         assert result.next_idx == 2
                         # 推送正文不应含封面图 markdown
-                        assert "![" not in posted["body"]["content"]
+                        # 7-8 fix: /api/external/chapters 字段名是 chapter_content (不是 content)
+                        assert "![" not in posted["body"]["chapter_content"]
+                        # 封面挂时 cover_url="" → publisher 不发 chapter_cover_image 字段
+                        assert posted["body"].get("chapter_cover_image", "") in (None, "")
                     finally:
                         Path("/tmp/c.jpg").unlink(missing_ok=True)
 

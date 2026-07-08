@@ -135,6 +135,7 @@ class MockObsidian:
                 if isinstance(body, bytes):
                     try:
                         import json as _json
+
                         body = _json.loads(body.decode("utf-8"))
                     except Exception:
                         body = {}
@@ -284,17 +285,24 @@ def setup_publisher_mocks(
             if isinstance(body, bytes):
                 try:
                     import json as _json
+
                     body = _json.loads(body.decode("utf-8"))
                 except Exception:
                     body = {}
-            chapter_slug = body.get("chapter_slug", "test-ch") if isinstance(body, dict) else "test-ch"
+            chapter_slug = (
+                body.get("chapter_slug", "test-ch") if isinstance(body, dict) else "test-ch"
+            )
             resp.json.return_value = {
                 "ok": True,
                 "chapter": {
                     "id": "ch_mock_001",
                     "slug": chapter_slug,
                     "url": f"https://obs.example.com/chapters/{chapter_slug}",
-                    "novel_slug": body.get("novel_slug", "meta-realm") if isinstance(body, dict) else "meta-realm",
+                    "novel_slug": (
+                        body.get("novel_slug", "meta-realm")
+                        if isinstance(body, dict)
+                        else "meta-realm"
+                    ),
                     "volume_order": body.get("volume_order", 1) if isinstance(body, dict) else 1,
                     "chapter_order": 1,
                 },

@@ -129,7 +129,9 @@ class TestHmacClientSign:
         body = {"chapter": 1, "title": "测试"}
         headers = client.sign(body, timestamp_ms=1717699200000)
         # 默认契约: 签 over json.dumps(body) (与 HTTP 发送 body 字节一致)
-        expected_sig = compute_signature(SECRET, 1717699200000, body_bytes=json.dumps(body, ensure_ascii=False))
+        expected_sig = compute_signature(
+            SECRET, 1717699200000, body_bytes=json.dumps(body, ensure_ascii=False)
+        )
         assert headers["X-Publisher-Signature"] == expected_sig
 
     def test_signature_uses_raw_body_when_provided(self):
@@ -142,7 +144,9 @@ class TestHmacClientSign:
         expected_sig = compute_signature(SECRET, 1717699200000, body_bytes=raw)
         assert headers["X-Publisher-Signature"] == expected_sig
         # 同时验证用 raw 签的, 跟默认 (用 json.dumps) 签的不一致
-        default_sig = compute_signature(SECRET, 1717699200000, body_bytes=json.dumps(body, ensure_ascii=False))
+        default_sig = compute_signature(
+            SECRET, 1717699200000, body_bytes=json.dumps(body, ensure_ascii=False)
+        )
         assert headers["X-Publisher-Signature"] != default_sig
 
 

@@ -37,3 +37,12 @@ coverage/
 # 调度
 data/novel/*/drafts/
 output/
+# 凭据备份 (本地恢复用, 绝不进仓)
+.env.bak.*
+.env.bak
+
+# 数据目录 (gitignored, 备份走 obsidian-novel-backups 仓)
+data/
+data/covers/
+data/state.json.lock
+data/cache/
