@@ -51,6 +51,9 @@ class PublishState:
     last_error: str | None = None
     skip_next: bool = False
     idempotency_keys: dict[str, str] = field(default_factory=dict)
+    # 7-8 P2: 多本并行配额检查 (e.g. "2026-07-08-08" = 今天 8 点档已写过)
+    # 默认空串 = 从未写过, 兼容老 v0.2 state.json (没此字段)
+    last_pushed_slot: str = ""
     schema_version: int = SCHEMA_VERSION
 
     # ------------------------------------------------------------------
@@ -71,14 +74,22 @@ class PublishState:
     # ------------------------------------------------------------------
     # 状态转移
     # ------------------------------------------------------------------
-    def mark_pushed(self, idx: int, idem_key: str) -> None:
-        """推送成功后调用: next_idx++, last_pushed_* 更新, idempotency 记录"""
+    def mark_pushed(self, idx: int, idem_key: str, *, slot: str = "") -> None:
+        """推送成功后调用: next_idx++, last_pushed_* 更新, idempotency 记录
+
+        Args:
+            idx:       本次推的章节号
+            idem_key:  幂等 key
+            slot:      推送档位标识 (e.g. "2026-07-08-08"), 用于多本并行配额检查
+        """
         self.next_idx = idx + 1
         self.last_pushed_idx = idx
         self.last_pushed_at = _now_iso()
         self.last_status = "success"
         self.last_error = None
         self.idempotency_keys[str(idx)] = idem_key
+        if slot:
+            self.last_pushed_slot = slot
         # skip_next 用一次就清 (不论成功失败, 一次性)
         if self.skip_next:
             self.skip_next = False

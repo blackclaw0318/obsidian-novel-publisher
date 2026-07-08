@@ -33,6 +33,7 @@ import os
 import signal
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -51,6 +52,27 @@ from .state import (
 )
 from .text_punct import normalize_cn_punctuation
 from .topic_gen import generate_one_shot
+
+# P2: 多本并行调度
+from .backup_reader import BackupReader
+from .character_loader import fetch_characters
+from .novel_outline import fetch_outline
+from .novel_registry import (
+    DEFAULT_NOVELS_YAML,
+    Novel,
+    NovelRegistry,
+    Schedule,
+    current_volume,
+    get_enabled_novels,
+    load_novels,
+    render_chapter_slug,
+)
+from .state_per_novel import (
+    DEFAULT_STATE_DIR,
+    load_state_for_novel,
+    save_state_for_novel,
+)
+from .style_guide import fetch_style_guide
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +226,437 @@ def _resolve_hard_timeout(override: float | None) -> float:
                 "PUBLISH_HARD_TIMEOUT_S 非法值 %r, 用默认 %ds", raw, DEFAULT_HARD_TIMEOUT_S
             )
     return float(DEFAULT_HARD_TIMEOUT_S)
+
+
+# --------------------------------------------------------------------------
+# P2: 多本并行 + 配额检查 + 错误隔离
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class NovelRunResult:
+    """单本小说 run 结果"""
+
+    novel_id: str
+    status: str  # success | failed | skipped
+    error: str | None = None
+    chapter_idx: int | None = None
+    slot: str = ""
+
+
+@dataclass
+class AggregateResult:
+    """多本并行汇总"""
+
+    total: int
+    success: int
+    failed: int
+    skipped: int
+    details: list[NovelRunResult]
+
+    @classmethod
+    def from_results(cls, results: list[NovelRunResult]) -> AggregateResult:
+        return cls(
+            total=len(results),
+            success=sum(1 for r in results if r.status == "success"),
+            failed=sum(1 for r in results if r.status == "failed"),
+            skipped=sum(1 for r in results if r.status == "skipped"),
+            details=results,
+        )
+
+    def is_all_success(self) -> bool:
+        return self.failed == 0
+
+    def __str__(self) -> str:
+        lines = [f"📊 多本汇总: total={self.total} success={self.success} failed={self.failed} skipped={self.skipped}"]
+        for r in self.details:
+            mark = {"success": "✅", "failed": "❌", "skipped": "⊘"}.get(r.status, "?")
+            extra = f" ({r.error})" if r.error else ""
+            slot = f" slot={r.slot}" if r.slot else ""
+            lines.append(f"  {mark} {r.novel_id} → {r.status} idx={r.chapter_idx}{slot}{extra}")
+        return "\n".join(lines)
+
+
+def _current_slot(now: datetime, schedule: Schedule, tz_name: str = "Asia/Shanghai") -> str:
+    """计算当前推送档位标识 (e.g. "2026-07-08-08")
+
+    逻辑:
+    - 把 now 转 tz_name
+    - 找最近一个 schedule.hours 里的 hour (向下取整, e.g. 8:30 → 8)
+    - 格式: "{YYYY-MM-DD}-{HH}"
+    """
+    from datetime import datetime as _dt
+    import zoneinfo
+
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except (KeyError, ValueError):
+        tz = zoneinfo.ZoneInfo("UTC")
+    local = now.astimezone(tz)
+    # 找 <= local.hour 的最大 schedule.hours (e.g. local.hour=15, hours=[8,12,18] → 12)
+    eligible = [h for h in schedule.hours if h <= local.hour]
+    slot_hour = max(eligible) if eligible else schedule.hours[0]
+    return f"{local.strftime('%Y-%m-%d')}-{slot_hour:02d}"
+
+
+def _should_skip_slot(state: PublishState, slot: str) -> bool:
+    """本档已写过 → 跳过
+
+    逻辑: state.last_pushed_slot == slot 表示本档已推过, 跳
+    """
+    if not state.last_pushed_slot:
+        return False  # 从未写过
+    return state.last_pushed_slot == slot
+
+
+def _run_one_novel(
+    config: PublisherConfig,
+    novel: Novel,
+    schedule: Schedule,
+    *,
+    force: bool = False,
+    hard_timeout_s: float | None = None,
+    backup_reader: BackupReader | None = None,
+) -> PublishState:
+    """单本小说的完整推送 (P2 抽出来供 run_once / run_all_novels 复用)
+
+    与 v0.2 run_once 区别:
+    1. state 路径: load_state_for_novel(novel.id) (从 novel.id 推)
+    2. novel slug/title/desc/status 从 novel 读 (不硬编码)
+    3. volume_title/volume_order 用 current_volume(novel, idx) 算
+    4. chapter_slug 用 render_chapter_slug(novel, idx)
+    5. 配额检查: 本档已写过 → mark_skipped 返
+    6. outline/style_guide/characters 喂给 writer (从 backups 仓拉)
+
+    Raises:
+        PublisherError: 任何步骤失败 (state 已被 mark_failed)
+    """
+    from .state_per_novel import state_path_for
+
+    state = load_state_for_novel(novel.id)
+
+    # 0. skip_next 手动跳过 (P0 老逻辑保留, quota check 已在 run_all_novels 循环里做)
+    if state.skip_next and not force:
+        logger.info("[%s] state.skip_next=True, 本次跳过 (idx=%d)", novel.id, state.next_idx)
+        state.mark_skipped(state.next_idx, reason="skip_next")
+        save_state_for_novel(state, novel.id)
+        return state
+
+    slot = _current_slot(_now_utc(), schedule)
+
+    idx = state.next_idx
+
+    # 1. 拉 outline / style_guide / characters (P1 集成)
+    outline_text = ""
+    style_guide_dict: dict = {}
+    characters_dict: dict = {}
+    if backup_reader is not None:
+        try:
+            o = fetch_outline(
+                backup_reader, novel.id, novel.paths.outline,
+                cache_dir=DEFAULT_STATE_DIR.parent / "cache",
+            )
+            outline_text = o.content
+            logger.info("[%s] outline: %d 字节, sha 变=%s", novel.id, len(outline_text), o.is_changed)
+        except Exception as e:
+            logger.warning("[%s] 拉 outline 失败, 退化: %s", novel.id, e)
+        try:
+            sg, _ = fetch_style_guide(
+                backup_reader, novel.id, novel.paths.style_guide,
+                cache_dir=DEFAULT_STATE_DIR.parent / "cache",
+            )
+            style_guide_dict = {
+                "title": novel.title,
+                "genre_hint": novel.category,
+                "style_description": sg.style_description,
+                "character_refs": [
+                    {"name": c.name, "role": c.role, "description": c.description}
+                    for c in sg.character_refs
+                ],
+                "scene_palette": sg.scene_palette,
+                "cover_prompt_template": sg.cover_prompt_template,
+            }
+            logger.info("[%s] style_guide: %d 人物, %d 色板", novel.id, len(sg.character_refs), len(sg.scene_palette))
+        except Exception as e:
+            logger.warning("[%s] 拉 style_guide 失败, 退化: %s", novel.id, e)
+        try:
+            ch, _ = fetch_characters(
+                backup_reader, novel.id, novel.paths.characters,
+                cache_dir=DEFAULT_STATE_DIR.parent / "cache",
+            )
+            if ch.main:
+                characters_dict = {
+                    "main": {
+                        "name": ch.main.name,
+                        "role": ch.main.role,
+                        "gender": ch.main.gender,
+                        "age": ch.main.age,
+                        "appearance": ch.main.appearance,
+                        "personality": ch.main.personality,
+                    }
+                }
+                logger.info("[%s] characters: main=%s, supporting=%d", novel.id, ch.main.name, len(ch.supporting))
+        except Exception as e:
+            logger.warning("[%s] 拉 characters 失败, 退化: %s", novel.id, e)
+
+    # 2. 构造模块
+    writer = NovelWriter(api_key=config.minimaxi_api_key)
+    cover_gen = CoverGenerator(api_key=config.minimaxi_api_key)
+    uploader = CoverUploader(
+        base_url=config.obsidian_admin_base_url,
+        admin_token=config.obsidian_admin_token,
+    )
+    hmac = HmacClient(
+        HmacConfig(
+            publish_id=config.obsidian_publish_id,
+            publish_secret=config.obsidian_publish_secret,
+        )
+    )
+
+    hard_timeout_s = _resolve_hard_timeout(hard_timeout_s)
+    _old_alarm = _arm_hard_timeout(hard_timeout_s)
+
+    try:
+        # 3. 选题
+        logger.info("[%s/%d] 选题中…", novel.id, idx)
+        topic = generate_one_shot(n_candidates=1)[0]
+
+        # 4. 写章节
+        logger.info("[%s/%d] 写章节: %s", novel.id, idx, topic.title)
+        truth_snapshot: dict = {
+            "topic": topic.title,
+            "outline": outline_text or topic.outline,
+            "keywords": topic.keywords_used,
+            "category": novel.category or "科幻",
+            "chapter_goal": (outline_text or topic.outline)[:200],
+        }
+        if characters_dict.get("main"):
+            truth_snapshot["main_character"] = characters_dict["main"]
+        style_guide_full = {**style_guide_dict, "outline": topic.outline, "title": topic.title}
+        draft: ChapterDraft = writer.write_chapter(
+            chapter_idx=idx,
+            truth_snapshot=truth_snapshot,
+            style_guide=style_guide_full,
+        )
+
+        # 5. 封面 (尽力而为, 失败不阻塞)
+        cover_url = ""
+        cover_path: Path | None = None
+        try:
+            config.cover_tmp_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("[%s/%d] 画封面…", novel.id, idx)
+            cover_local_path = cover_gen.generate(prompt=draft.cover_prompt, chapter_idx=idx)
+            cp = Path(cover_local_path)
+            if not cp.exists():
+                raise CoverGenError(f"CoverGenerator 返回路径不存在: {cp}")
+            cover_result = uploader.upload(cp, title=f"ch-{idx:03d}")
+            cover_url = cover_result.url
+            cover_path = cp
+        except Exception as e:
+            logger.warning("[%s/%d] 封面失败, 降级无封面推送: %s: %s", novel.id, idx, type(e).__name__, e)
+
+        # 6. 渲染
+        if cover_url and cover_url.startswith("/"):
+            cover_url = config.obsidian_admin_base_url.rstrip("/") + cover_url
+        clean_raw_text = normalize_cn_punctuation(draft.raw_text)
+        rendered = render_markdown(
+            raw_text=clean_raw_text,
+            cover_url=cover_url,
+            chapter_idx=idx,
+            chapter_title=topic.title,
+        )
+
+        # 7. 推 obsidian (3-tier Novel>Volume>Chapter)
+        idem_key = new_idempotency_key()
+        vol = current_volume(novel, idx)
+        chapter_slug = render_chapter_slug(novel, idx)
+        body = {
+            "novel_slug": novel.slug,
+            "novel_title": novel.title,
+            "novel_description": novel.description,
+            "novel_status": novel.status,
+            "volume_title": vol.title,
+            "volume_order": vol.order,
+            "chapter_slug": chapter_slug,
+            "chapter_title": rendered.title,
+            "chapter_content": rendered.content_markdown,
+            "chapter_excerpt": rendered.excerpt,
+            "chapter_published": True,
+            "external_id": f"{novel.id}-ch{idx:03d}",
+            "idempotency_key": idem_key,
+        }
+        raw_body = json.dumps(body, ensure_ascii=False)
+        sig_headers = hmac.sign(body, idempotency_key=idem_key, raw_body=raw_body)
+        logger.info("[%s/%d] 推送博客: POST %s", novel.id, idx, config.obsidian_publish_url)
+        resp = _post_with_sig(
+            url=config.obsidian_publish_url,
+            body=body, raw_body=raw_body, sig_headers=sig_headers,
+        )
+
+        # 8. GitHub 备份 (可选)
+        if config.github_backup_token and config.github_backup_token.strip():
+            try:
+                backup = GithubBackup(
+                    repo=config.github_backup_repo,
+                    token=config.github_backup_token,
+                )
+                post_url = ""
+                if isinstance(resp, dict):
+                    post_url = (resp.get("chapter") or {}).get("url", "") or resp.get("url", "")
+                backup_meta = ChapterMeta.now(
+                    chapter_idx=idx, title=topic.title,
+                    word_count=draft.word_count, llm_usage=draft.usage or {},
+                    obsidian_post_url=post_url,
+                )
+                backup_result = backup.upload(
+                    chapter_md=clean_raw_text,
+                    cover_jpg=cover_path.read_bytes() if cover_path else b"",
+                    meta=backup_meta,
+                )
+                logger.info(
+                    "[%s/%d] GitHub 备份 ✅ commit=%s",
+                    novel.id, idx, backup_result.commit_sha[:12],
+                )
+            except Exception as e:
+                logger.warning(
+                    "[%s/%d] GitHub 备份失败 (主推送仍成功): %s: %s",
+                    novel.id, idx, type(e).__name__, e,
+                )
+
+        # 9. 成功: 写 state (带 slot, 多本并行配额检查)
+        state.mark_pushed(idx, idem_key, slot=slot)
+        save_state_for_novel(state, novel.id)
+        logger.info("[%s/%d] ✓ 推送成功: idem=%s slot=%s", novel.id, idx, idem_key[:8], slot)
+        return state
+
+    except LLMError as e:
+        state.mark_failed(idx, f"LLM error: {e}")
+        save_state_for_novel(state, novel.id)
+        raise ChapterGenError(f"[{novel.id}/{idx}] LLM 调用失败: {e}") from e
+    except CoverUploadError as e:
+        state.mark_failed(idx, f"cover upload error: {e}")
+        save_state_for_novel(state, novel.id)
+        raise CoverGenError(f"[{novel.id}/{idx}] 封面上传失败: {e}") from e
+    except RunTimeoutError as e:
+        state.mark_failed(idx, f"hard timeout: {e}")
+        save_state_for_novel(state, novel.id)
+        logger.error(
+            "[%s/%d] ✗ 命中全局硬时限 (%.0fs), 本次失败: %s",
+            novel.id, idx, hard_timeout_s, e,
+        )
+        raise
+    except Exception as e:
+        state.mark_failed(idx, f"unexpected: {type(e).__name__}: {e}")
+        save_state_for_novel(state, novel.id)
+        raise PublisherError(f"[{novel.id}/{idx}] 未预期错误: {e}") from e
+    finally:
+        _cancel_hard_timeout(_old_alarm)
+
+
+def _now_utc() -> datetime:
+    """当前 UTC 时间 (实为运行机器墙钟)"""
+    from datetime import datetime as _dt, timezone
+    return _dt.now(timezone.utc)
+
+
+def run_all_novels(
+    config: PublisherConfig,
+    *,
+    force: bool = False,
+    hard_timeout_s: float | None = None,
+    registry: NovelRegistry | None = None,
+) -> AggregateResult:
+    """多本并行推送 (P2)
+
+    Args:
+        config:          publisher 配置
+        force:           True = 忽略配额检查 / skip_next
+        hard_timeout_s:  每本硬时限 (秒)
+        registry:        注入测试用; 不传则从 novels.yaml 读
+
+    Returns:
+        AggregateResult { total, success, failed, skipped, details }
+
+    行为:
+        1. 加载 novels.yaml → 拿 enabled 列表
+        2. for novel in enabled:
+            - 调 _run_one_novel(novel, ...)
+            - try/except 隔离: 1 本失败不阻塞其他本
+        3. 汇总 返 AggregateResult
+
+    Raises:
+        PublisherError: 配置缺失
+    """
+    if registry is None:
+        try:
+            registry = load_novels()
+        except FileNotFoundError as e:
+            raise PublisherError(f"novels.yaml 不存在: {e}") from e
+
+    enabled = get_enabled_novels(registry)
+    if not enabled:
+        logger.warning("[P2] novels.yaml 里 0 本 enabled, 退出")
+        return AggregateResult(total=0, success=0, failed=0, skipped=0, details=[])
+
+    # 构造 BackupReader (P1 集成, 喂给 outline/style_guide/characters)
+    backup_reader: BackupReader | None = None
+    if config.github_backup_token and config.github_backup_token.strip():
+        try:
+            backup_reader = BackupReader(
+                repo=config.github_backup_repo, token=config.github_backup_token,
+            )
+        except Exception as e:
+            logger.warning("[P2] BackupReader 构造失败, 退化不拉 outline/...: %s", e)
+
+    slot = _current_slot(_now_utc(), registry.schedule)
+    logger.info(
+        "[P2] 多本推送开始: %d 本 enabled, slot=%s", len(enabled), slot,
+    )
+
+    results: list[NovelRunResult] = []
+    for novel in enabled:
+        # 配额检查提到 run_all_novels 循环里 (避免 _run_one_novel mock 后不起作用)
+        if not force:
+            from .state_per_novel import load_state_for_novel as _load_s
+            _state = _load_s(novel.id)
+            if _should_skip_slot(_state, slot):
+                logger.info(
+                    "[P2] novel %s 本档 %s 已推过 (last_pushed_slot=%s), 跳过",
+                    novel.id, slot, _state.last_pushed_slot,
+                )
+                _state.mark_skipped(_state.next_idx, reason=f"slot_already_pushed:{slot}")
+                from .state_per_novel import save_state_for_novel as _save_s
+                _save_s(_state, novel.id)
+                results.append(NovelRunResult(
+                    novel_id=novel.id, status="skipped",
+                    chapter_idx=_state.next_idx, slot=slot,
+                ))
+                continue
+
+        try:
+            state = _run_one_novel(
+                config, novel, registry.schedule,
+                force=force, hard_timeout_s=hard_timeout_s,
+                backup_reader=backup_reader,
+            )
+            results.append(NovelRunResult(
+                novel_id=novel.id,
+                status=state.last_status,
+                chapter_idx=state.last_pushed_idx,
+                slot=state.last_pushed_slot,
+            ))
+        except PublisherError as e:
+            logger.error(
+                "[P2] novel %s 推送失败, 继续下一本: %s", novel.id, e,
+            )
+            results.append(NovelRunResult(
+                novel_id=novel.id, status="failed", error=str(e),
+                slot=slot,
+            ))
+
+    agg = AggregateResult.from_results(results)
+    logger.info("\n%s", agg)
+    return agg
 
 
 # --------------------------------------------------------------------------
@@ -489,6 +942,11 @@ def cli_main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="跑完整流程但不真推送 (仅到 HMAC 签名前, 用于本地调试)",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="P2 多本并行: 遍历 novels.yaml 所有 enabled 小说, 各写 1 章 (错误隔离)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG 日志")
     args = parser.parse_args(argv)
 
@@ -534,6 +992,15 @@ def cli_main(argv: list[str] | None = None) -> int:
 
         if args.dry_run:
             return _dry_run(config)
+
+        if args.all:
+            agg = run_all_novels(config, force=args.force)
+            if agg.failed == 0 and agg.success > 0:
+                return 0
+            if agg.success == 0 and agg.failed > 0:
+                return 1
+            # 部分失败返 1 (避免 "success" 状态)
+            return 1 if agg.failed > 0 else 0
 
         state = run_once(config, force=args.force)
         if state.last_status == "skipped":
