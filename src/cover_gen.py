@@ -90,11 +90,20 @@ class CoverGenerator:
                 if self._validate(out_path):
                     logger.info(f"[CoverGen] ✅ 成功: {out_path}")
                     return str(out_path)
-                # 图无效 (太小), 触发下一次重试
-                out_path.unlink(missing_ok=True)
-                raise CoverGenError(f"封面图过小 (size < {self.MIN_SIZE_BYTES}), 视为无效")
+                # 图无效 (太小或 PIL 校验失败), 触发下一次重试
+                # 7-7 fix: 区分错误信息, 不再误导说 "size < 50000"
+                actual_size = out_path.stat().st_size if out_path.exists() else 0
+                if actual_size < self.MIN_SIZE_BYTES:
+                    raise CoverGenError(f"封面图过小 (size={actual_size} < {self.MIN_SIZE_BYTES}), 视为无效")
+                else:
+                    raise CoverGenError(f"封面图 PIL 校验失败 (size={actual_size}), 视为无效")
             except Exception as e:
                 last_err = e
+                # 清除上一轮残文件
+                try:
+                    (self.output_dir / f"{chapter_idx:03d}.jpg").unlink(missing_ok=True)
+                except Exception:
+                    pass
                 logger.warning(f"[CoverGen] 第 {attempt} 次失败: {e}")
                 if attempt < self.MAX_RETRIES:
                     time.sleep(self.RETRY_DELAY * attempt)
@@ -119,7 +128,7 @@ class CoverGenerator:
             "n": 1,
             "prompt_optimizer": True,
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        resp = requests.post(url, headers=headers, json=payload, timeout=(10, 120))
         resp.raise_for_status()
         body = resp.json()
 
@@ -133,7 +142,7 @@ class CoverGenerator:
     def _download(self, url: str, chapter_idx: int) -> pathlib.Path:
         """下载远程图到本地。"""
         out_path = self.output_dir / f"{chapter_idx:03d}.jpg"
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(url, timeout=(10, 30))
         resp.raise_for_status()
         out_path.write_bytes(resp.content)
         return out_path
@@ -142,7 +151,10 @@ class CoverGenerator:
         """校验图有效性 (存在 + size > 阈值 + PIL 能打开)。"""
         if not path.exists():
             return False
-        if path.stat().st_size < self.MIN_SIZE_BYTES:
+        sz = path.stat().st_size
+        if sz < self.MIN_SIZE_BYTES:
+            # 7-7 debug: 打印实际文件大小 (排查"size < 50000" 误杀)
+            logger.warning(f"[CoverGen] _validate 失败: {path} size={sz} < {self.MIN_SIZE_BYTES}")
             return False
         try:
             from PIL import Image
@@ -150,5 +162,6 @@ class CoverGenerator:
             with Image.open(path) as img:
                 img.verify()  # 校验格式
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[CoverGen] _validate PIL 失败: {path} err={e}")
             return False

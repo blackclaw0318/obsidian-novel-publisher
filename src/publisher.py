@@ -27,8 +27,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +39,7 @@ from dotenv import load_dotenv
 
 from .cover_gen import CoverGenerator
 from .cover_upload import CoverUploader, CoverUploadError
-from .github_backup import ChapterMeta, GithubBackup, GithubBackupError
+from .github_backup import ChapterMeta, GithubBackup
 from .hmac_client import HmacClient, HmacConfig, new_idempotency_key
 from .markdown_renderer import render as render_markdown
 from .novel_writer import ChapterDraft, LLMError, NovelWriter
@@ -47,6 +49,7 @@ from .state import (
     load_state,
     save_state,
 )
+from .text_punct import normalize_cn_punctuation
 from .topic_gen import generate_one_shot
 
 logger = logging.getLogger(__name__)
@@ -102,10 +105,14 @@ class PublisherConfig:
             minimaxi_text_model=os.environ.get("MINIMAXI_TEXT_MODEL", "MiniMax-M3"),
             minimaxi_image_model=os.environ.get("MINIMAXI_IMAGE_MODEL", "image-01"),
             obsidian_publish_url=os.environ.get(
-                "OBSIDIAN_PUBLISH_URL", "https://shangkun.uk/api/external/posts"
+                "OBSIDIAN_PUBLISH_URL", "https://shangkun.uk/api/external/chapters"
             ),
             obsidian_publish_id=required["OBSIDIAN_PUBLISH_ID"],
-            obsidian_publish_secret=required["OBSIDIAN_PUBLISH_SECRET"],
+            obsidian_publish_secret=(
+                # 优先用服务器侧名 (与 obsidian-journal .env 一致), 兑底为旧名
+                os.environ.get("OBSIDIAN_NOVEL_PUBLISH_SECRET", "").strip()
+                or required["OBSIDIAN_PUBLISH_SECRET"]
+            ),
             obsidian_admin_token=os.environ.get("OBSIDIAN_ADMIN_TOKEN", ""),
             obsidian_admin_base_url=os.environ.get(
                 "OBSIDIAN_ADMIN_BASE_URL", "https://shangkun.uk"
@@ -148,17 +155,73 @@ class PublishError(PublisherError):
     """推送博客失败 (签名错 / HTTP 错 / 业务错)"""
 
 
+class RunTimeoutError(PublisherError):
+    """单次 run 超过全局硬时限 (防止手动验证时沙箱无限期卡死)"""
+
+
+# 全局硬时限: 一次 run_once 的 wall-clock 上限 (秒)。
+# 正常 happy path ≈ topic 1-4min + write ~5min + 封面 ~1.5min + 推送 <1min ≈ 12min,
+# 900s (15min) 留余量; 超时即硬停, 保证无论哪个环节挂死都不会无限卡沙箱。
+# 可用 PUBLISH_HARD_TIMEOUT_S 覆盖; 设 0 关闭 (不推荐)。
+DEFAULT_HARD_TIMEOUT_S = 900
+
+
+def _hard_timeout_handler(signum, frame):  # noqa: ARG001
+    raise RunTimeoutError("单次 run 超过全局硬时限, 已硬停 (防沙箱卡死)")
+
+
+def _arm_hard_timeout(seconds: float):
+    """启动全局硬时限 (SIGALRM)。返回旧 handler (用于 cancel 时还原), 或 None 表示未启用。
+
+    仅 Unix 主线程生效 (systemd oneshot / 手动运行都是主线程)。
+    seconds<=0 或平台不支持 → 不启用, 返回 None。
+    """
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        return None
+    old = signal.signal(signal.SIGALRM, _hard_timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    return old
+
+
+def _cancel_hard_timeout(old_handler) -> None:
+    """取消全局硬时限, 还原旧 handler。old_handler=None 时无操作。"""
+    if old_handler is None or not hasattr(signal, "SIGALRM"):
+        return
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, old_handler)
+
+
+def _resolve_hard_timeout(override: float | None) -> float:
+    """解析单次 run 硬时限: 显式参数 > PUBLISH_HARD_TIMEOUT_S > 默认。"""
+    if override is not None:
+        return override
+    raw = os.environ.get("PUBLISH_HARD_TIMEOUT_S", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning("PUBLISH_HARD_TIMEOUT_S 非法值 %r, 用默认 %ds", raw, DEFAULT_HARD_TIMEOUT_S)
+    return float(DEFAULT_HARD_TIMEOUT_S)
+
+
 # --------------------------------------------------------------------------
 # 主流程
 # --------------------------------------------------------------------------
 
 
-def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
+def run_once(
+    config: PublisherConfig,
+    *,
+    force: bool = False,
+    hard_timeout_s: float | None = None,
+) -> PublishState:
     """执行一次完整推送流程, 返回更新后的 state
 
     Args:
-        config:  publisher 配置
-        force:   True = 忽略 skip_next 强制推送 (默认 False)
+        config:          publisher 配置
+        force:           True = 忽略 skip_next 强制推送 (默认 False)
+        hard_timeout_s:  全局硬时限 (秒); None = 读 PUBLISH_HARD_TIMEOUT_S / 默认 900s。
+                         超时即硬停并 mark_failed, 保证不无限卡死。
 
     Returns:
         更新后的 PublishState (已 save)
@@ -191,6 +254,10 @@ def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
         )
     )
 
+    # 全局硬时限: 任何环节挂死都不会无限卡死 (SIGALRM 强制中断)
+    hard_timeout_s = _resolve_hard_timeout(hard_timeout_s)
+    _old_alarm = _arm_hard_timeout(hard_timeout_s)
+
     try:
         # 2. 选题
         logger.info("[%d] 选题中…", idx)
@@ -198,10 +265,14 @@ def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
 
         # 3. 写章节
         logger.info("[%d] 写章节: %s", idx, topic.title)
+        # 7-7 fix: 把 topic.genre_hint + outline 注入 truth_snapshot,
+        # 让 _compose_cover_prompt 能拿到 category/chapter_goal, 不再降级到通用 prompt
         truth_snapshot: dict = {
             "topic": topic.title,
             "outline": topic.outline,
             "keywords": topic.keywords_used,
+            "category": topic.genre_hint or "科幻",  # 兜底: 科幻 (本项目主题材)
+            "chapter_goal": topic.outline[:200],  # 喂给封面 prompt
         }
         style_guide: dict = {
             "title": topic.title,
@@ -214,46 +285,82 @@ def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
             style_guide=style_guide,
         )
 
-        # 4. 画封面 (本地 tmp) — CoverGenerator.generate 返回本地路径
-        config.cover_tmp_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("[%d] 画封面 (prompt=%s...)", idx, draft.cover_prompt[:40])
-        cover_local_path = cover_gen.generate(
-            prompt=draft.cover_prompt,
-            chapter_idx=idx,
-        )
-        cover_path = Path(cover_local_path)
-        if not cover_path.exists():
-            raise CoverGenError(f"CoverGenerator 返回路径不存在: {cover_path}")
+        # 4+5. 封面 (生成 + 上传) — 尽力而为, 失败不阻塞小说推送
+        # 设计: 图片是可选增强, 挂了就降级为无封面纯文本推送 (cover_url="")
+        # 任一步 (生成/下载/上传) 异常都被本地兜住, 不冒泡到外层 except
+        cover_url = ""
+        cover_path: Path | None = None
+        try:
+            config.cover_tmp_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("[%d] 画封面 (prompt=%s...)", idx, draft.cover_prompt[:40])
+            cover_local_path = cover_gen.generate(
+                prompt=draft.cover_prompt,
+                chapter_idx=idx,
+            )
+            cp = Path(cover_local_path)
+            if not cp.exists():
+                raise CoverGenError(f"CoverGenerator 返回路径不存在: {cp}")
+            logger.info("[%d] 上传封面到博客: %s", idx, cp)
+            cover_result = uploader.upload(cp, title=f"ch-{idx:03d}")
+            cover_url = cover_result.url
+            cover_path = cp
+        except Exception as e:
+            logger.warning(
+                "[%d] 封面失败, 降级为无封面推送 (小说正文不受影响): %s: %s",
+                idx,
+                type(e).__name__,
+                e,
+            )
 
-        # 5. 上传封面 → URL
-        logger.info("[%d] 上传封面到博客: %s", idx, cover_path)
-        cover_result = uploader.upload(cover_path, title=f"ch-{idx:03d}")
+        # 6. 渲染 markdown (cover_url 为空时 renderer 自动省略封面块)
+        # 7-7 fix: 封面 URL 在 obsidian-journal 返回的是相对路径 (/uploads/xxx.jpg),
+        # 在 Cloudflare 边缘 / 路由下会被误 404, 需要在 publisher 拼绝对 URL。
+        # 官网 base 从 config.obsidian_admin_base_url 取 (与 .env OBSIDIAN_ADMIN_BASE_URL 一致)
+        if cover_url and cover_url.startswith("/"):
+            cover_url = config.obsidian_admin_base_url.rstrip("/") + cover_url
 
-        # 6. 渲染 markdown
+        # 7-7 fix: M3 v2 输出 ASCII 半角标点 (, . : ; ? ! ' "), 走一遍全角化
+        # 7-7 修复: 在生成 draft 后立即 normalization, 一份 clean text 既给 renderer
+        # 也给 GitHub 备份 (与发布上线的文本一致)
+        clean_raw_text = normalize_cn_punctuation(draft.raw_text)
+
         rendered = render_markdown(
-            raw_text=draft.raw_text,
-            cover_url=cover_result.url,
+            raw_text=clean_raw_text,
+            cover_url=cover_url,
             chapter_idx=idx,
             chapter_title=topic.title,
         )
 
         # 7. HMAC 签名 + POST
         idem_key = new_idempotency_key()
+        # 2026-07-08 fix: publisher 改推 /api/external/chapters (3-tier Novel + Volume + Chapter)
+        # 取代 /api/external/posts (单层 Post, 落 /posts 列表, 架构错位)
+        # 同 novel_slug 多次推送 → 同一 Novel + Volume + chapter order 自增
         body = {
-            "slug": f"meta-realm-ch{idx:03d}",
-            "title": rendered.title,
-            "excerpt": rendered.excerpt,
-            "content": rendered.content_markdown,
-            "category": "novel",
+            "novel_slug": "meta-realm",
+            "novel_title": "元界",
+            "novel_description": "一个关于意识、边界与觉醒的科幻故事。",
+            "novel_status": "ongoing",
+            "volume_title": "第一卷 · 星海之始",
+            "volume_order": 1,
+            "chapter_slug": f"meta-realm-ch{idx:03d}",
+            "chapter_title": rendered.title,
+            "chapter_content": rendered.content_markdown,
+            "chapter_excerpt": rendered.excerpt,
+            "chapter_published": True,
             "external_id": f"meta_realm_obsidian-ch{idx:03d}",
             "idempotency_key": idem_key,
         }
-        sig_headers = hmac.sign(body, idempotency_key=idem_key)
+        # 7-7 fix: 与 obsidian-journal 服务端契约对齐, 签 over 真实 HTTP body (rawBody)
+        # 服务端 verifyHmac(rawBody, ...) — 不能用 sort_keys+无空白 canonical, 否则中间格式不同 → bad_signature
+        raw_body = json.dumps(body, ensure_ascii=False)
+        sig_headers = hmac.sign(body, idempotency_key=idem_key, raw_body=raw_body)
         logger.info("[%d] 推送博客: POST %s", idx, config.obsidian_publish_url)
 
         resp = _post_with_sig(
             url=config.obsidian_publish_url,
             body=body,
+            raw_body=raw_body,
             sig_headers=sig_headers,
         )
 
@@ -266,7 +373,8 @@ def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
                 )
                 post_url = ""
                 if isinstance(resp, dict):
-                    post_url = (resp.get("post") or {}).get("url", "") or resp.get("url", "")
+                    # 2026-07-08: 推 /chapters 后响应是 {ok, chapter: {url, ...}}
+                    post_url = (resp.get("chapter") or {}).get("url", "") or resp.get("url", "")
                 backup_meta = ChapterMeta.now(
                     chapter_idx=idx,
                     title=topic.title,
@@ -275,8 +383,8 @@ def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
                     obsidian_post_url=post_url,
                 )
                 backup_result = backup.upload(
-                    chapter_md=rendered.content_markdown,
-                    cover_jpg=cover_path.read_bytes(),
+                    chapter_md=clean_raw_text,
+                    cover_jpg=cover_path.read_bytes() if cover_path else b"",
                     meta=backup_meta,
                 )
                 logger.info(
@@ -285,8 +393,13 @@ def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
                     backup_result.commit_sha[:12],
                     len(backup_result.pushed_files),
                 )
-            except GithubBackupError as e:
-                logger.warning("[%d] GitHub 备份失败 (主推送仍成功): %s", idx, e)
+            except Exception as e:  # noqa: BLE001 备份阶段任何异常都不能阻主推送 (含 pydantic/网络/JSON)
+                logger.warning(
+                    "[%d] GitHub 备份失败 (主推送仍成功): %s: %s",
+                    idx,
+                    type(e).__name__,
+                    e,
+                )
         else:
             logger.info("[%d] GitHub 备份未配置 (GITHUB_BACKUP_TOKEN 缺失), 跳过", idx)
 
@@ -304,18 +417,34 @@ def run_once(config: PublisherConfig, *, force: bool = False) -> PublishState:
         state.mark_failed(idx, f"cover upload error: {e}")
         save_state(state, config.state_path)
         raise CoverGenError(f"[{idx}] 封面上传失败: {e}") from e
+    except RunTimeoutError as e:
+        state.mark_failed(idx, f"hard timeout: {e}")
+        save_state(state, config.state_path)
+        logger.error("[%d] ✗ 命中全局硬时限 (%.0fs), 本次失败: %s", idx, hard_timeout_s, e)
+        raise
     except Exception as e:
         state.mark_failed(idx, f"unexpected: {type(e).__name__}: {e}")
         save_state(state, config.state_path)
         raise PublisherError(f"[{idx}] 未预期错误: {e}") from e
+    finally:
+        _cancel_hard_timeout(_old_alarm)
 
 
-def _post_with_sig(url: str, body: dict, sig_headers: dict[str, str]) -> dict:
-    """POST 到博客 + 验签 + 解析响应"""
+def _post_with_sig(url: str, body: dict, sig_headers: dict[str, str], *, raw_body: str | None = None) -> dict:
+    """POST 到博客 + 验签 + 解析响应
+
+    Args:
+        url:         POST URL
+        body:        请求体 dict (保留以便测试 / 调错)
+        sig_headers: hmac.sign() 返回的 4 个 X-* 头
+        raw_body:    实际发出去的 HTTP body 字节串; 须与签名时一致, 否则服务端验签失败。
+                     不传则用 json.dumps(body) 默认序列化 (保证与签名侧一致)。
+    """
     import requests
 
+    payload = raw_body if raw_body is not None else json.dumps(body, ensure_ascii=False)
     headers = {"Content-Type": "application/json", **sig_headers}
-    resp = requests.post(url, json=body, headers=headers, timeout=60)
+    resp = requests.post(url, data=payload.encode("utf-8"), headers=headers, timeout=(10, 60))
     resp.raise_for_status()
     return resp.json()
 

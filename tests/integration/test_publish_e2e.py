@@ -79,9 +79,11 @@ def _setup_full_mocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     # 5. 推送 mock (用 list 收集调用)
     post_calls = []
 
-    def fake_post(url, body, sig_headers):
+    def fake_post(url, body, sig_headers, **kwargs):
         post_calls.append({"url": url, "body": body, "headers": sig_headers})
-        return {"ok": True, "post": {"id": "post-1", "url": "https://obs.example.com/posts/1"}}
+        # 2026-07-08: 推 /api/external/chapters (3-tier) 后返回 chapter 字段
+        chapter_slug = body.get("chapter_slug", "test-ch")
+        return {"ok": True, "chapter": {"id": "ch_mock_001", "slug": chapter_slug, "url": f"https://obs.example.com/chapters/{chapter_slug}"}}
 
     monkeypatch.setattr("src.publisher._post_with_sig", fake_post)
 
@@ -106,11 +108,18 @@ class TestFullPipeline:
         # 推送发生
         assert len(mocks["post_calls"]) == 1
         call = mocks["post_calls"][0]
-        assert call["url"] == "https://shangkun.uk/api/external/posts"
-        assert call["body"]["category"] == "novel"
-        assert call["body"]["slug"] == "meta-realm-ch001"
+        # 2026-07-08: publisher 改推 /api/external/chapters (3-tier Novel + Volume + Chapter)
+        assert call["url"] == "https://shangkun.uk/api/external/chapters"
+        assert call["body"]["novel_slug"] == "meta-realm"
+        assert call["body"]["novel_title"] == "元界"
+        assert call["body"]["volume_title"] == "第一卷 · 星海之始"
+        assert call["body"]["volume_order"] == 1
+        assert call["body"]["chapter_slug"] == "meta-realm-ch001"
+        assert call["body"]["chapter_title"]
+        assert call["body"]["chapter_content"]
         assert call["body"]["external_id"] == "meta_realm_obsidian-ch001"
         assert "idempotency_key" in call["body"]
+        assert call["body"]["chapter_published"] is True
         # HMAC headers
         assert "X-Publisher-Signature" in call["headers"]
 

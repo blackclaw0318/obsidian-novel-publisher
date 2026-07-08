@@ -83,7 +83,7 @@ class NovelWriter:
     DEFAULT_MODEL = "MiniMax-M3"
     DEFAULT_TEMPERATURE = 0.9
     DEFAULT_MAX_TOKENS = 8000  # B.3 提示 4096 不够, ~3000 字中文 ≈ 6000-8000 tokens
-    DEFAULT_TIMEOUT = 120  # M3 长输出偶发慢
+    DEFAULT_TIMEOUT = 300  # 7-7: M3 长输出 7-7 实测 ~6min, 120s 不够, 改 300s (5min) 避免误杀
     DEFAULT_RETRIES = 3
 
     def __init__(
@@ -270,7 +270,7 @@ class NovelWriter:
         for attempt in range(max_retries):
             try:
                 resp = requests.post(
-                    url, headers=headers, json=payload, timeout=self.DEFAULT_TIMEOUT
+                    url, headers=headers, json=payload, timeout=(10, self.DEFAULT_TIMEOUT)
                 )
                 if 400 <= resp.status_code < 500:
                     # 参数错: 立即抛, 不重试

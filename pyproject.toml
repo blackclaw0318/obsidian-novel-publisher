@@ -31,6 +31,7 @@ dependencies = [
     "requests>=2.31.0",          # HTTP 调用 (HMAC 推送 + GitHub Contents API)
     "python-dotenv>=1.0.0",       # .env 加载
     "pydantic>=2.5.0",            # 状态/配置模型 (类型安全)
+    "Pillow>=10.0.0",             # cover_gen 封面图校验 (PIL.Image.verify) — 7-7 修复: 缺此 dep 触发"size < 50000" 误杀
 ]
 
 # ============================================================

@@ -60,9 +60,17 @@ def canonical_body(body: dict[str, Any]) -> str:
     return json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def compute_signature(secret: str, timestamp_ms: int, body: dict[str, Any]) -> str:
-    """计算 HMAC-SHA256 hexdigest"""
-    message = f"{timestamp_ms}.{canonical_body(body)}".encode()
+def compute_signature(secret: str, timestamp_ms: int, body: dict[str, Any] | None = None, *, body_bytes: str | None = None) -> str:
+    """计算 HMAC-SHA256 hexdigest
+
+    二选一: body (dict, 会 canonical 化) 或 body_bytes (str, 原样签名)。
+    生产请用 body_bytes (与 HTTP 实际发送字节一致, 与 obsidian-journal 服务端 rawBody 验签契约对齐)。
+    """
+    if body_bytes is None:
+        if body is None:
+            raise HmacError("compute_signature 需传 body 或 body_bytes")
+        body_bytes = canonical_body(body)
+    message = f"{timestamp_ms}.{body_bytes}".encode()
     sig = hmac.new(
         secret.encode("utf-8"),
         message,
@@ -94,6 +102,7 @@ class HmacClient:
         *,
         timestamp_ms: int | None = None,
         idempotency_key: str | None = None,
+        raw_body: str | None = None,
     ) -> dict[str, str]:
         """生成签名 headers 字典
 
@@ -101,12 +110,17 @@ class HmacClient:
             body:                  要发送的请求体 (dict)
             timestamp_ms:          可选, 不传则用当前时间 (毫秒)
             idempotency_key:       可选, 不传则生成新的 UUID v4 hex
+            raw_body:              实际发到服务器的字节串 (str); 需与 requests.post(data=raw_body) 完全一致。
+                                   不传则自动用 json.dumps(body) (即 requests json= 的默认序列化)。
+                                   **与 obsidian-journal 服务端契约**: 服务端在 rawBody 上验签,
+                                   所以签名时必须用真实 HTTP body 字节, 不能用 sort_keys/无空白 canonical。
 
         Returns:
             headers dict (X-Publisher-Id, X-Publisher-Signature, X-Publisher-Timestamp, X-Idempotency-Key)
         """
         ts = timestamp_ms if timestamp_ms is not None else _now_ms()
-        sig = compute_signature(self.config.publish_secret, ts, body)
+        body_bytes = raw_body if raw_body is not None else json.dumps(body, ensure_ascii=False)
+        sig = compute_signature(self.config.publish_secret, ts, body_bytes=body_bytes)
         idem = idempotency_key or new_idempotency_key()
 
         return {

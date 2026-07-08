@@ -102,38 +102,53 @@ class MockLLM:
 
 # ============ MockObsidian ============
 class MockObsidian:
-    """模拟 obsidian-journal /api/external/posts + /api/admin/resources"""
+    """模拟 obsidian-journal /api/external/chapters (v0.38+) + /api/admin/resources"""
 
     def __init__(self, *, fail_count: int = 0, response_status: int = 201):
         self.fail_count = fail_count
         self.response_status = response_status
-        self.posts_received: list[dict] = []
+        self.chapters_received: list[dict] = []
         self.resources_received: list[dict] = []
 
     def patch(self):
         from contextlib import ExitStack
 
         stack = ExitStack()
-        counter = {"posts": 0, "resources": 0}
+        counter = {"chapters": 0, "resources": 0}
 
         def fake_post(url, **kwargs):
-            counter["posts" if "/api/external/posts" in url else "resources"] += 1
+            counter["chapters" if "/api/external/chapters" in url else "resources"] += 1
 
-            # 模拟前 N 次失败
-            if "api/external/posts" in url:
-                self.posts_received.append({"url": url, "kwargs": kwargs})
-                if counter["posts"] <= self.fail_count:
+            # 2026-07-08: publisher 改推 /api/external/chapters (3-tier)
+            if "api/external/chapters" in url:
+                self.chapters_received.append({"url": url, "kwargs": kwargs})
+                if counter["chapters"] <= self.fail_count:
                     resp = MagicMock()
                     resp.status_code = 500
                     resp.text = "server error"
                     resp.raise_for_status = MagicMock(side_effect=Exception("500"))
                     return resp
-                # 成功
+                # 成功: 返回 chapter 字段
                 resp = MagicMock()
                 resp.status_code = self.response_status
+                body = kwargs.get("data") or kwargs.get("json") or {}
+                if isinstance(body, bytes):
+                    try:
+                        import json as _json
+                        body = _json.loads(body.decode("utf-8"))
+                    except Exception:
+                        body = {}
+                chapter_slug = body.get("chapter_slug", "test-ch")
                 resp.json.return_value = {
                     "ok": True,
-                    "post": {"id": "post-1", "url": "https://obs.example.com/posts/1"},
+                    "chapter": {
+                        "id": "ch_mock_001",
+                        "slug": chapter_slug,
+                        "url": f"https://obs.example.com/chapters/{chapter_slug}",
+                        "novel_slug": body.get("novel_slug", "meta-realm"),
+                        "volume_order": body.get("volume_order", 1),
+                        "chapter_order": 1,
+                    },
                 }
                 resp.raise_for_status = MagicMock()
                 return resp
@@ -234,7 +249,7 @@ def setup_publisher_mocks(
 
     # 合并 counter
     llm_count = {"n": 0}
-    obs_posts_count = {"n": 0}
+    obs_chapters_count = {"n": 0}
     obs_res_count = {"n": 0}
     gh_put_count = {"n": 0}
 
@@ -254,18 +269,36 @@ def setup_publisher_mocks(
             resp.raise_for_status = MagicMock()
             return resp
 
-        # Obsidian /api/external/posts
-        if "/api/external/posts" in url:
-            obs_posts_count["n"] += 1
-            obsidian.posts_received.append({"url": url, "kwargs": kwargs})
-            if obs_posts_count["n"] <= obsidian.fail_count:
+        # Obsidian /api/external/chapters (v0.38+, 取代 /api/external/posts)
+        if "/api/external/chapters" in url:
+            obs_chapters_count["n"] += 1
+            obsidian.chapters_received.append({"url": url, "kwargs": kwargs})
+            if obs_chapters_count["n"] <= obsidian.fail_count:
                 resp = MagicMock()
                 resp.status_code = 500
                 resp.raise_for_status = MagicMock(side_effect=Exception("500"))
                 return resp
             resp = MagicMock()
             resp.status_code = obsidian.response_status
-            resp.json.return_value = {"ok": True, "post": {"id": "post-1"}}
+            body = kwargs.get("data") or kwargs.get("json") or {}
+            if isinstance(body, bytes):
+                try:
+                    import json as _json
+                    body = _json.loads(body.decode("utf-8"))
+                except Exception:
+                    body = {}
+            chapter_slug = body.get("chapter_slug", "test-ch") if isinstance(body, dict) else "test-ch"
+            resp.json.return_value = {
+                "ok": True,
+                "chapter": {
+                    "id": "ch_mock_001",
+                    "slug": chapter_slug,
+                    "url": f"https://obs.example.com/chapters/{chapter_slug}",
+                    "novel_slug": body.get("novel_slug", "meta-realm") if isinstance(body, dict) else "meta-realm",
+                    "volume_order": body.get("volume_order", 1) if isinstance(body, dict) else 1,
+                    "chapter_order": 1,
+                },
+            }
             resp.raise_for_status = MagicMock()
             return resp
 
