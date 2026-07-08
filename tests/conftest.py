@@ -28,6 +28,7 @@ def pytest_configure(config: object) -> None:
         "MINIMAXI_API_KEY": "sk-test-dummy",
         "OBSIDIAN_PUBLISH_SECRET": "test-secret-dummy",
         "OBSIDIAN_PUBLISH_ID": "novel-publisher",
+        "OBSIDIAN_PUBLISH_URL": "https://www.shangkun.uk/api/external/chapters",
         "GITHUB_BACKUP_TOKEN": "github_pat_dummy",
         "OBSIDIAN_ADMIN_TOKEN": "admin-jwt-dummy",
         "OBSIDIAN_ADMIN_BASE_URL": "http://localhost:3000",

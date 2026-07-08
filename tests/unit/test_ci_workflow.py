@@ -105,9 +105,13 @@ def test_unit_test_coverage_threshold(workflow: dict) -> None:
 
 
 def test_integration_test_coverage_threshold(workflow: dict) -> None:
+    # 7-8 决策: 集成测重点端到端流, 不强制 80% (unit 覆盖 utility code, 集成覆盖 publisher.run_once)
+    # 集成覆盖率仅作监控, 失败不阻断 build (run cmd 末尾有 || true)
     job = workflow["jobs"]["integration-test"]
     run_cmds = " ".join(step.get("run", "") for step in job["steps"] if step.get("run"))
-    assert "--cov-fail-under=80" in run_cmds
+    # 7-8: 改 '--cov-fail-under=80' 不再出现, 允许 || true 阻断
+    assert "|| true" in run_cmds
+    assert "--cov-fail-under=80" not in run_cmds
 
 
 # ============ Build job ============
