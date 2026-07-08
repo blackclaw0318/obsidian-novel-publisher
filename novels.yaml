@@ -1,0 +1,78 @@
+# ============================================================
+# obsidian-novel-publisher — 多本小说注册表
+# v0.3.2 P0 引入
+# 老板可手编, 改后 commit 即可 (publisher 启动时读)
+# ============================================================
+
+novels:
+  # ============================================================
+  # 第 1 本 — 元界 (已存在 3 章, 老板 7-8 拍板 15:36 后续手工删)
+  # ============================================================
+  - id: meta_realm_obsidian
+    title: 元界
+    slug: meta-realm
+    description: 一个关于意识、边界与觉醒的科幻故事。
+    status: ongoing          # ongoing | completed | hiatus
+    enabled: false           # 7-8 老板拍: 后续手工删, publisher 不动; 测试期间不写
+    daily_chapter: true      # 8/12/18 三档是否为本本写章
+    target_word_count: 3000
+    category: 科幻
+    keywords: [意识上传, 月球基地, AI 觉醒]
+    # ============ Volume 配置 (支持多卷) ============
+    volumes:
+      - order: 1
+        title: "第一卷: 星海之始"
+        description: 觉醒前的最后平静。
+        start_chapter: 1
+        end_chapter: 50        # 满了自动通知老板开新卷
+    # ============ chapter slug 规范 (新推章节) ============
+    chapter_slug_template: "{novel_slug}-ch{idx:03d}"
+    # 老 slug (chapter-1-awakening / chapter-2-realm / meta-realm-ch003) 保留, 不重命名
+    # ============ backups 仓路径 (相对 backups 仓根) ============
+    paths:
+      outline: novels/meta_realm_obsidian/outline.md
+      outline_meta: novels/meta_realm_obsidian/outline.meta.json
+      style_guide: novels/meta_realm_obsidian/style_guide.md
+      characters: novels/meta_realm_obsidian/characters.md
+      state: novels/meta_realm_obsidian/state.json
+      chapters_dir: novels/meta_realm_obsidian/chapters/
+    created_at: 2026-07-05T00:00:00Z
+
+  # ============================================================
+  # 第 2 本 — 玻璃海 (待审, 老板 7-8 拍可启用)
+  # ============================================================
+  - id: glass_sea_obsidian
+    title: 玻璃海
+    slug: glass-sea
+    description: 沿海小城, 退潮后海滩上出现的不该存在的东西。
+    status: ongoing
+    enabled: false           # 7-8 拍: 大纲待审, 暂不开
+    daily_chapter: true
+    target_word_count: 3000
+    category: 玄幻
+    keywords: [退潮, 海市蜃楼, 失忆]
+    volumes:
+      - order: 1
+        title: "卷一: 退潮"
+        description: 故事开始, 退潮后第一夜。
+        start_chapter: 1
+        end_chapter: 30
+    chapter_slug_template: "{novel_slug}-ch{idx:03d}"
+    paths:
+      outline: novels/glass_sea_obsidian/outline.md
+      outline_meta: novels/glass_sea_obsidian/outline.meta.json
+      style_guide: novels/glass_sea_obsidian/style_guide.md
+      characters: novels/glass_sea_obsidian/characters.md
+      state: novels/glass_sea_obsidian/state.json
+      chapters_dir: novels/glass_sea_obsidian/chapters/
+    created_at: 2026-07-08T00:00:00Z
+
+# ============================================================
+# 推送时间窗 (systemd timer 配置, 这里只声明 publisher 期望节奏)
+# 老板 7-8 15:36 拍: 每天 8/12/18 三档, 每档"每本都写 1 章",不是"3 本轮转"
+# ============================================================
+schedule:
+  hours: [8, 12, 18]               # 每天 3 次, 与 systemd timer 配合
+  per_run_novel_limit: null        # 一次 run_once 写"所有 enabled" 小说 (取代 v0.2 的"单本轮转")
+  daily_chapter_target: 3          # 每本每天目标章数 (8/12/18 各 1 章)
+  # 实际 N 本 × 3 章/天 = 3N 章/天, 老板可按本调整 daily_chapter (true/false)
