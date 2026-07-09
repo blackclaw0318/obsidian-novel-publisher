@@ -52,7 +52,7 @@ from .hmac_client import HmacClient, HmacConfig
 from .markdown_renderer import render as render_markdown
 from .novel_outline import fetch_outline
 from .novel_registry import (
-    DEFAULT_NOVELS_YAML,
+    DEFAULT_NOVELS_YAML,  # noqa: F401 — integration tests 用 src.publisher.DEFAULT_NOVELS_YAML 做 monkeypatch
     Novel,
     NovelRegistry,
     Schedule,
@@ -716,6 +716,7 @@ def _run_one_novel(
                 backup = GithubBackup(
                     repo=config.github_backup_repo,
                     token=config.github_backup_token,
+                    novel_id=novel.id,  # 7-9 fix: 传 novel_id 避免推到默认 meta_realm_obsidian
                 )
                 post_url = ""
                 if isinstance(resp, dict):
