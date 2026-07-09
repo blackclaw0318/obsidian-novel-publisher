@@ -6,29 +6,58 @@
 
 novels:
   # ============================================================
-  # 第 1 本 — 元界 (已存在 3 章, 老板 7-8 拍板 15:36 后续手工删)
+  # 第 1 本 — 碳与道 (7-9 00:50 新开, 1 卷 5 章 短篇)
+  # 测试: P0-P6 全套链路 + multi-novel runner
+  # ============================================================
+  - id: carbon_tao_obsidian
+    title: 碳与道
+    slug: carbon-tao
+    description: 一个有机化学博士生意外合成 C₉₉ 簇, 吸入后细胞重组 — 现代化学实验室里的硬核修仙者。
+    status: ongoing
+    enabled: true            # 7-9 测试期间开启
+    daily_chapter: true      # 8/12/18 三档都为本本写章
+    target_word_count: 3000
+    category: 科幻
+    keywords: [现代, 化学, 修仙, 日常, 碳簇, 硬科幻]
+    # ============ Volume 配置 (支持多卷) ============
+    volumes:
+      - order: 1
+        title: "第一卷: 异常合成"
+        description: 31 天里, 一个化学博士从理性走向炼体, 最后拒绝秩序。
+        start_chapter: 1
+        end_chapter: 5         # 短篇, 5 章收尾 (满 5 自动通知开新卷, 本卷到 ch5 即完结)
+    # ============ chapter slug 规范 (新推章节) ============
+    chapter_slug_template: "{novel_slug}-ch{idx:03d}"
+    # ============ backups 仓路径 (相对 backups 仓根) ============
+    paths:
+      outline: novels/carbon_tao_obsidian/outline.md
+      outline_meta: novels/carbon_tao_obsidian/outline.meta.json
+      style_guide: novels/carbon_tao_obsidian/style_guide.md
+      characters: novels/carbon_tao_obsidian/characters.md
+      state: novels/carbon_tao_obsidian/state.json
+      chapters_dir: novels/carbon_tao_obsidian/chapters/
+    created_at: 2026-07-09T00:00:00Z
+
+  # ============================================================
+  # 第 2 本 — 元界 (老仓, 老板 7-8 拍板 15:36 后续手工删)
   # ============================================================
   - id: meta_realm_obsidian
     title: 元界
     slug: meta-realm
     description: 一个关于意识、边界与觉醒的科幻故事。
-    status: ongoing          # ongoing | completed | hiatus
+    status: ongoing
     enabled: false           # 7-8 老板拍: 后续手工删, publisher 不动; 测试期间不写
-    daily_chapter: true      # 8/12/18 三档是否为本本写章
+    daily_chapter: true
     target_word_count: 3000
     category: 科幻
     keywords: [意识上传, 月球基地, AI 觉醒]
-    # ============ Volume 配置 (支持多卷) ============
     volumes:
       - order: 1
         title: "第一卷: 星海之始"
         description: 觉醒前的最后平静。
         start_chapter: 1
-        end_chapter: 50        # 满了自动通知老板开新卷
-    # ============ chapter slug 规范 (新推章节) ============
+        end_chapter: 50
     chapter_slug_template: "{novel_slug}-ch{idx:03d}"
-    # 老 slug (chapter-1-awakening / chapter-2-realm / meta-realm-ch003) 保留, 不重命名
-    # ============ backups 仓路径 (相对 backups 仓根) ============
     paths:
       outline: novels/meta_realm_obsidian/outline.md
       outline_meta: novels/meta_realm_obsidian/outline.meta.json
@@ -39,7 +68,7 @@ novels:
     created_at: 2026-07-05T00:00:00Z
 
   # ============================================================
-  # 第 2 本 — 玻璃海 (待审, 老板 7-8 拍可启用)
+  # 第 3 本 — 玻璃海 (待审, 老板 7-8 拍可启用)
   # ============================================================
   - id: glass_sea_obsidian
     title: 玻璃海
@@ -72,7 +101,6 @@ novels:
 # 老板 7-8 15:36 拍: 每天 8/12/18 三档, 每档"每本都写 1 章",不是"3 本轮转"
 # ============================================================
 schedule:
-  hours: [8, 12, 18]               # 每天 3 次, 与 systemd timer 配合
-  per_run_novel_limit: null        # 一次 run_once 写"所有 enabled" 小说 (取代 v0.2 的"单本轮转")
-  daily_chapter_target: 3          # 每本每天目标章数 (8/12/18 各 1 章)
-  # 实际 N 本 × 3 章/天 = 3N 章/天, 老板可按本调整 daily_chapter (true/false)
+  hours: [8, 12, 18]
+  per_run_novel_limit: null
+  daily_chapter_target: 3

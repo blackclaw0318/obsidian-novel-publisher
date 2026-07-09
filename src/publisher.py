@@ -27,35 +27,29 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .cover_gen import CoverGenerator
-from .cover_upload import CoverUploader, CoverUploadError
-from .github_backup import ChapterMeta, GithubBackup
-from .hmac_client import HmacClient, HmacConfig, new_idempotency_key
-from .markdown_renderer import render as render_markdown
-from .novel_writer import ChapterDraft, LLMError, NovelWriter
-from .state import (
-    DEFAULT_STATE_PATH,
-    PublishState,
-    load_state,
-    save_state,
-)
-from .text_punct import _merge_orphan_quotes, normalize_cn_punctuation
-from .topic_gen import generate_one_shot
-
 # P2: 多本并行调度
 from .backup_reader import BackupReader
+from .character_loader import Characters as CharactersParsed
 from .character_loader import fetch_characters
+from .cover_gen import CoverGenerator
+from .cover_prompt_builder import build_cover_prompt
+from .cover_upload import CoverUploader, CoverUploadError
+from .github_backup import ChapterMeta, GithubBackup
+from .hmac_client import HmacClient, HmacConfig
+from .markdown_renderer import render as render_markdown
 from .novel_outline import fetch_outline
 from .novel_registry import (
     DEFAULT_NOVELS_YAML,
@@ -67,17 +61,37 @@ from .novel_registry import (
     load_novels,
     render_chapter_slug,
 )
+from .novel_writer import ChapterDraft, LLMError, NovelWriter
+from .state import (
+    DEFAULT_STATE_PATH,
+    PublishState,
+    load_state,
+    save_state,
+)
 from .state_per_novel import (
     DEFAULT_STATE_DIR,
     load_state_for_novel,
     save_state_for_novel,
 )
-from .style_guide import fetch_style_guide
-from .cover_prompt_builder import build_cover_prompt
-from .character_loader import Characters as CharactersParsed
 from .style_guide import StyleGuide as StyleGuideParsed
+from .style_guide import fetch_style_guide
+from .text_punct import _merge_orphan_quotes, normalize_cn_punctuation
+from .topic_gen import generate_one_shot
 
 logger = logging.getLogger(__name__)
+
+
+def stable_idempotency_key(novel_id: str, chapter_idx: int) -> str:
+    """稳定的 idempotency_key (per novel + chapter)
+
+    7-9 fix: 不用 UUID v4 (每次重生成), 用 sha256(novel_id + chapter_idx)[:32]
+    这样同一章重推 → 同 key → obsidian 端 幂等去重 (返 200 + 旧数据)
+    不同章 → 不同 key → 正常创建
+    """
+    raw = f"{novel_id}-ch{chapter_idx:03d}"
+    return hashlib.sha256(raw.encode()).hexdigest()[
+        :32
+    ]  # noqa: PLR2004 — 32-char sha256 prefix is intentional
 
 
 # --------------------------------------------------------------------------
@@ -271,7 +285,9 @@ class AggregateResult:
         return self.failed == 0
 
     def __str__(self) -> str:
-        lines = [f"📊 多本汇总: total={self.total} success={self.success} failed={self.failed} skipped={self.skipped}"]
+        lines = [
+            f"📊 多本汇总: total={self.total} success={self.success} failed={self.failed} skipped={self.skipped}"
+        ]
         for r in self.details:
             mark = {"success": "✅", "failed": "❌", "skipped": "⊘"}.get(r.status, "?")
             extra = f" ({r.error})" if r.error else ""
@@ -288,7 +304,6 @@ def _current_slot(now: datetime, schedule: Schedule, tz_name: str = "Asia/Shangh
     - 找最近一个 schedule.hours 里的 hour (向下取整, e.g. 8:30 → 8)
     - 格式: "{YYYY-MM-DD}-{HH}"
     """
-    from datetime import datetime as _dt
     import zoneinfo
 
     try:
@@ -310,6 +325,95 @@ def _should_skip_slot(state: PublishState, slot: str) -> bool:
     if not state.last_pushed_slot:
         return False  # 从未写过
     return state.last_pushed_slot == slot
+
+
+# --------------------------------------------------------------------------
+# P5+: outline 按章节切片 + chapter_goal 显式
+# --------------------------------------------------------------------------
+
+_CHAPTER_HEADER_RE = re.compile(r"(^###\s+Ch\d+.*?$)", re.MULTILINE)
+
+
+def _extract_chapter_outline(outline_text: str, chapter_idx: int) -> str:
+    """从全本 outline.md 抽出单章描述 (~1500 字)
+
+    寻 "### Ch{N}" 段, 取到下一个 "### Ch" 或文件末尾。
+    找不到则回退到前 1500 字 (兼容旧 outline schema)。
+
+    Args:
+        outline_text: 完整 outline.md 内容 (从 backups 仓拉)
+        chapter_idx:  目标章节号 (1-based)
+
+    Returns:
+        单章切片 markdown 文本 (含 ### Ch{N} header)
+    """
+    if not outline_text:
+        return ""
+    pattern = rf"^###\s+Ch{chapter_idx}[^\n]*$"
+    m = re.search(pattern, outline_text, re.MULTILINE)
+    if not m:
+        logger.warning("[outline] 找不到 Ch%d header, 回退前 1500 字", chapter_idx)
+        return outline_text[:1500]
+    start = m.start()
+    # 找下一个 ### Ch{N+1} 或 Ch{N+...}
+    next_m = re.search(r"^###\s+Ch(?!\d{0,2}$)\d+", outline_text[m.end() :], re.MULTILINE)
+    end = m.end() + next_m.start() if next_m else len(outline_text)
+    slice_md = outline_text[start:end].strip()
+    # 截断到 1800 字, 留点 buffer
+    if len(slice_md) > 1800:
+        slice_md = slice_md[:1800]
+    return slice_md
+
+
+def _compose_chapter_outline_skeleton(novel_title: str, chapter_idx: int) -> str:
+    """当 outline.md 缺失/格式不对时, 用本小说标题 + 章节号构造兜底骨架"""
+    return (
+        f"### Ch{chapter_idx} · (本章由 publisher 自动生成, 老板可后修)\n\n"
+        f"小说《{novel_title}》第 {chapter_idx} 章, "
+        f"~3000 字中篇科幻, 主角驱动剧情, 章末留钩子。"
+    )
+
+
+def _to_backup_raw_url(
+    obsidian_cover_url: str, config: PublisherConfig, novel_id: str, prev_idx: int
+) -> str | None:
+    """把 obsidian 公网封面 URL 转成 backups 仓 raw.githubusercontent.com URL
+
+    minimax 服务端访问不到 shangkun.uk (Cloudflare bot 防护),
+    但能访问 raw.githubusercontent.com (GitHub CDN)。
+    返回 None 表示不需要转 (走原 obsidian URL)。
+
+    路径映射: truth/novels/{novel_id}/covers/ch-{idx:03d}.jpg
+    → https://raw.githubusercontent.com/{repo}/main/truth/novels/{novel_id}/covers/ch-{idx:03d}.jpg
+    """
+    if not config.github_backup_repo:
+        return None
+    return (
+        f"https://raw.githubusercontent.com/{config.github_backup_repo}/main/"
+        f"truth/novels/{novel_id}/covers/ch-{prev_idx:03d}.jpg"
+    )
+
+
+def _compose_chapter_goal(chapter_outline: str, novel_title: str, chapter_idx: int) -> str:
+    """chapter_goal: 显式 LLM 写作指令 (≤300 字)
+
+    不直接 dump outline (太长), 只取章节目标 + 关键冲突 + 钩子要求。
+    """
+    if not chapter_outline:
+        return _compose_chapter_outline_skeleton(novel_title, chapter_idx)
+    # 取章节 outline 里的 "章节目标" 行 (第一段 "**章节目标**: ..." 之后到下一个 ** 之前)
+    m = re.search(r"\*\*章节目标\*\*\s*[::]\s*(.+?)(?=\n\n|\Z)", chapter_outline, re.DOTALL)
+    goal = m.group(1).strip() if m else chapter_outline[:200]
+    if len(goal) > 300:
+        goal = goal[:300]
+    # 显式加 3 项硬性要求
+    return (
+        f"{goal}\n\n"
+        f"【硬性写作要求】\n"
+        f"1. 字数: 2800-3200 中文字符 (硬下限 2800)\n"
+        f"2. 章末: 必须留钩子 (未解之谜 / 反转 / 悬念)\n"
+        f"3. 严禁: AI 自述 / 政治敏感 / 半角标点出现在中文字符之间"
+    )
 
 
 def _run_one_novel(
@@ -334,7 +438,6 @@ def _run_one_novel(
     Raises:
         PublisherError: 任何步骤失败 (state 已被 mark_failed)
     """
-    from .state_per_novel import state_path_for
 
     state = load_state_for_novel(novel.id)
 
@@ -358,16 +461,22 @@ def _run_one_novel(
     if backup_reader is not None:
         try:
             o = fetch_outline(
-                backup_reader, novel.id, novel.paths.outline,
+                backup_reader,
+                novel.id,
+                novel.paths.outline,
                 cache_dir=DEFAULT_STATE_DIR.parent / "cache",
             )
             outline_text = o.content
-            logger.info("[%s] outline: %d 字节, sha 变=%s", novel.id, len(outline_text), o.is_changed)
+            logger.info(
+                "[%s] outline: %d 字节, sha 变=%s", novel.id, len(outline_text), o.is_changed
+            )
         except Exception as e:
             logger.warning("[%s] 拉 outline 失败, 退化: %s", novel.id, e)
         try:
             sg, _ = fetch_style_guide(
-                backup_reader, novel.id, novel.paths.style_guide,
+                backup_reader,
+                novel.id,
+                novel.paths.style_guide,
                 cache_dir=DEFAULT_STATE_DIR.parent / "cache",
             )
             sg_parsed = sg
@@ -382,12 +491,19 @@ def _run_one_novel(
                 "scene_palette": sg.scene_palette,
                 "cover_prompt_template": sg.cover_prompt_template,
             }
-            logger.info("[%s] style_guide: %d 人物, %d 色板", novel.id, len(sg.character_refs), len(sg.scene_palette))
+            logger.info(
+                "[%s] style_guide: %d 人物, %d 色板",
+                novel.id,
+                len(sg.character_refs),
+                len(sg.scene_palette),
+            )
         except Exception as e:
             logger.warning("[%s] 拉 style_guide 失败, 退化: %s", novel.id, e)
         try:
             ch, _ = fetch_characters(
-                backup_reader, novel.id, novel.paths.characters,
+                backup_reader,
+                novel.id,
+                novel.paths.characters,
                 cache_dir=DEFAULT_STATE_DIR.parent / "cache",
             )
             ch_parsed = ch
@@ -402,7 +518,12 @@ def _run_one_novel(
                         "personality": ch.main.personality,
                     }
                 }
-                logger.info("[%s] characters: main=%s, supporting=%d", novel.id, ch.main.name, len(ch.supporting))
+                logger.info(
+                    "[%s] characters: main=%s, supporting=%d",
+                    novel.id,
+                    ch.main.name,
+                    len(ch.supporting),
+                )
         except Exception as e:
             logger.warning("[%s] 拉 characters 失败, 退化: %s", novel.id, e)
 
@@ -424,18 +545,38 @@ def _run_one_novel(
     _old_alarm = _arm_hard_timeout(hard_timeout_s)
 
     try:
-        # 3. 选题
+        # 3. 选题 (v0.3.2 P5 fix: 传 novel.keywords + style_guide 给 topic_gen, 避免 LLM 跑偏到无关题材)
         logger.info("[%s/%d] 选题中…", novel.id, idx)
-        topic = generate_one_shot(n_candidates=1)[0]
+        topic_kwargs: dict = {"n_candidates": 1}
+        if novel.keywords:
+            topic_kwargs["keywords"] = list(novel.keywords)
+        if style_guide_dict:
+            topic_kwargs["style_guide"] = {
+                "title": novel.title,
+                "description": novel.description,
+                "category": novel.category,
+                "style_description": style_guide_dict.get("style_description", ""),
+            }
+        topic = generate_one_shot(**topic_kwargs)[0]
+        logger.info(
+            "[%s/%d] 选题结果: %s (genre=%s, keywords_used=%s)",
+            novel.id,
+            idx,
+            topic.title,
+            topic.genre_hint,
+            topic.keywords_used,
+        )
 
-        # 4. 写章节
+        # 4. 写章节 (v0.3.2 P5+ fix: outline 按章节切片 + chapter_goal 显式, 避免 5143 字节 outline 超 token 预算)
         logger.info("[%s/%d] 写章节: %s", novel.id, idx, topic.title)
+        chapter_outline = _extract_chapter_outline(outline_text, idx)
+        chapter_goal = _compose_chapter_goal(chapter_outline, novel.title, idx)
         truth_snapshot: dict = {
             "topic": topic.title,
-            "outline": outline_text or topic.outline,
+            "outline": chapter_outline,  # 仅本章节切片, ~1500 字
             "keywords": topic.keywords_used,
             "category": novel.category or "科幻",
-            "chapter_goal": (outline_text or topic.outline)[:200],
+            "chapter_goal": chapter_goal,
         }
         if characters_dict.get("main"):
             truth_snapshot["main_character"] = characters_dict["main"]
@@ -452,15 +593,30 @@ def _run_one_novel(
         try:
             config.cover_tmp_dir.mkdir(parents=True, exist_ok=True)
             # 7-8 P2.5: ch-2+ 用 ch-(idx-1) 封面公网 URL 作 subject_reference
+            # 7-9 fix: minimax 服务端访问不到 shangkun.uk (Cloudflare 保护), 用 backups 仓 raw URL 代替
             subject_ref_url: str | None = None
             if idx >= 2:
                 prev_url = state.cover_urls.get(str(idx - 1), "")
                 if prev_url:
-                    subject_ref_url = prev_url
-                    logger.info(
-                        "[%s/%d] image-to-image 启用, 参考图: %s",
-                        novel.id, idx, prev_url[:60] + "...",
-                    )
+                    # 优先用 backups 仓 raw URL (minimax 能访问 GitHub raw)
+                    # 备选: obsidian 公网 URL (fallback)
+                    raw_url = _to_backup_raw_url(prev_url, config, novel.id, idx - 1)
+                    if raw_url:
+                        subject_ref_url = raw_url
+                        logger.info(
+                            "[%s/%d] image-to-image 启用, 参考图 (raw): %s",
+                            novel.id,
+                            idx,
+                            raw_url[:80] + "...",
+                        )
+                    else:
+                        subject_ref_url = prev_url
+                        logger.info(
+                            "[%s/%d] image-to-image 启用, 参考图 (公网 fallback): %s",
+                            novel.id,
+                            idx,
+                            prev_url[:60] + "...",
+                        )
 
             # 7-8 P3: 用 style_guide + characters 驱动 cover prompt (替代 draft.cover_prompt)
             # 老板拍: style_guide.md 显式 prompt + character_refs 固定描述, 跨章一致
@@ -473,14 +629,18 @@ def _run_one_novel(
                 )
                 logger.info(
                     "[%s/%d] cover prompt 用 style_guide 驱动 (length=%d, template=%s)",
-                    novel.id, idx, len(cover_prompt),
+                    novel.id,
+                    idx,
+                    len(cover_prompt),
                     "CUSTOM" if sg_parsed.cover_prompt_template.strip() else "DEFAULT",
                 )
             else:
                 cover_prompt = draft.cover_prompt  # fallback: novel_writer 生成的
                 logger.info(
                     "[%s/%d] cover prompt 用 novel_writer 退化 (length=%d)",
-                    novel.id, idx, len(cover_prompt),
+                    novel.id,
+                    idx,
+                    len(cover_prompt),
                 )
 
             logger.info("[%s/%d] 画封面…", novel.id, idx)
@@ -496,7 +656,9 @@ def _run_one_novel(
             cover_url = cover_result.url
             cover_path = cp
         except Exception as e:
-            logger.warning("[%s/%d] 封面失败, 降级无封面推送: %s: %s", novel.id, idx, type(e).__name__, e)
+            logger.warning(
+                "[%s/%d] 封面失败, 降级无封面推送: %s: %s", novel.id, idx, type(e).__name__, e
+            )
 
         # 6. 渲染
         if cover_url and cover_url.startswith("/"):
@@ -510,7 +672,9 @@ def _run_one_novel(
         )
 
         # 7. 推 obsidian (3-tier Novel>Volume>Chapter)
-        idem_key = new_idempotency_key()
+        idem_key = stable_idempotency_key(
+            novel.id, idx
+        )  # 7-9 fix: 用 stable key 而非 UUID, 重推幂等
         vol = current_volume(novel, idx)
         chapter_slug = render_chapter_slug(novel, idx)
         body = {
@@ -541,7 +705,9 @@ def _run_one_novel(
         logger.info("[%s/%d] 推送博客: POST %s", novel.id, idx, config.obsidian_publish_url)
         resp = _post_with_sig(
             url=config.obsidian_publish_url,
-            body=body, raw_body=raw_body, sig_headers=sig_headers,
+            body=body,
+            raw_body=raw_body,
+            sig_headers=sig_headers,
         )
 
         # 8. GitHub 备份 (可选)
@@ -555,8 +721,10 @@ def _run_one_novel(
                 if isinstance(resp, dict):
                     post_url = (resp.get("chapter") or {}).get("url", "") or resp.get("url", "")
                 backup_meta = ChapterMeta.now(
-                    chapter_idx=idx, title=topic.title,
-                    word_count=draft.word_count, llm_usage=draft.usage or {},
+                    chapter_idx=idx,
+                    title=topic.title,
+                    word_count=draft.word_count,
+                    llm_usage=draft.usage or {},
                     obsidian_post_url=post_url,
                 )
                 backup_result = backup.upload(
@@ -566,12 +734,17 @@ def _run_one_novel(
                 )
                 logger.info(
                     "[%s/%d] GitHub 备份 ✅ commit=%s",
-                    novel.id, idx, backup_result.commit_sha[:12],
+                    novel.id,
+                    idx,
+                    backup_result.commit_sha[:12],
                 )
             except Exception as e:
                 logger.warning(
                     "[%s/%d] GitHub 备份失败 (主推送仍成功): %s: %s",
-                    novel.id, idx, type(e).__name__, e,
+                    novel.id,
+                    idx,
+                    type(e).__name__,
+                    e,
                 )
 
         # 9. 成功: 写 state (带 slot + cover_url, 多本并行配额检查 + image-to-image)
@@ -579,7 +752,11 @@ def _run_one_novel(
         save_state_for_novel(state, novel.id)
         logger.info(
             "[%s/%d] ✓ 推送成功: idem=%s slot=%s cover=%s",
-            novel.id, idx, idem_key[:8], slot, cover_url[:60] if cover_url else "(无)",
+            novel.id,
+            idx,
+            idem_key[:8],
+            slot,
+            cover_url[:60] if cover_url else "(无)",
         )
         return state
 
@@ -596,7 +773,10 @@ def _run_one_novel(
         save_state_for_novel(state, novel.id)
         logger.error(
             "[%s/%d] ✗ 命中全局硬时限 (%.0fs), 本次失败: %s",
-            novel.id, idx, hard_timeout_s, e,
+            novel.id,
+            idx,
+            hard_timeout_s,
+            e,
         )
         raise
     except Exception as e:
@@ -609,8 +789,9 @@ def _run_one_novel(
 
 def _now_utc() -> datetime:
     """当前 UTC 时间 (实为运行机器墙钟)"""
-    from datetime import datetime as _dt, timezone
-    return _dt.now(timezone.utc)
+    from datetime import datetime as _dt
+
+    return _dt.now(UTC)
 
 
 def run_all_novels(
@@ -657,14 +838,17 @@ def run_all_novels(
     if config.github_backup_token and config.github_backup_token.strip():
         try:
             backup_reader = BackupReader(
-                repo=config.github_backup_repo, token=config.github_backup_token,
+                repo=config.github_backup_repo,
+                token=config.github_backup_token,
             )
         except Exception as e:
             logger.warning("[P2] BackupReader 构造失败, 退化不拉 outline/...: %s", e)
 
     slot = _current_slot(_now_utc(), registry.schedule)
     logger.info(
-        "[P2] 多本推送开始: %d 本 enabled, slot=%s", len(enabled), slot,
+        "[P2] 多本推送开始: %d 本 enabled, slot=%s",
+        len(enabled),
+        slot,
     )
 
     results: list[NovelRunResult] = []
@@ -672,41 +856,60 @@ def run_all_novels(
         # 配额检查提到 run_all_novels 循环里 (避免 _run_one_novel mock 后不起作用)
         if not force:
             from .state_per_novel import load_state_for_novel as _load_s
+
             _state = _load_s(novel.id)
             if _should_skip_slot(_state, slot):
                 logger.info(
                     "[P2] novel %s 本档 %s 已推过 (last_pushed_slot=%s), 跳过",
-                    novel.id, slot, _state.last_pushed_slot,
+                    novel.id,
+                    slot,
+                    _state.last_pushed_slot,
                 )
                 _state.mark_skipped(_state.next_idx, reason=f"slot_already_pushed:{slot}")
                 from .state_per_novel import save_state_for_novel as _save_s
+
                 _save_s(_state, novel.id)
-                results.append(NovelRunResult(
-                    novel_id=novel.id, status="skipped",
-                    chapter_idx=_state.next_idx, slot=slot,
-                ))
+                results.append(
+                    NovelRunResult(
+                        novel_id=novel.id,
+                        status="skipped",
+                        chapter_idx=_state.next_idx,
+                        slot=slot,
+                    )
+                )
                 continue
 
         try:
             state = _run_one_novel(
-                config, novel, registry.schedule,
-                force=force, hard_timeout_s=hard_timeout_s,
+                config,
+                novel,
+                registry.schedule,
+                force=force,
+                hard_timeout_s=hard_timeout_s,
                 backup_reader=backup_reader,
             )
-            results.append(NovelRunResult(
-                novel_id=novel.id,
-                status=state.last_status,
-                chapter_idx=state.last_pushed_idx,
-                slot=state.last_pushed_slot,
-            ))
+            results.append(
+                NovelRunResult(
+                    novel_id=novel.id,
+                    status=state.last_status,
+                    chapter_idx=state.last_pushed_idx,
+                    slot=state.last_pushed_slot,
+                )
+            )
         except PublisherError as e:
             logger.error(
-                "[P2] novel %s 推送失败, 继续下一本: %s", novel.id, e,
+                "[P2] novel %s 推送失败, 继续下一本: %s",
+                novel.id,
+                e,
             )
-            results.append(NovelRunResult(
-                novel_id=novel.id, status="failed", error=str(e),
-                slot=slot,
-            ))
+            results.append(
+                NovelRunResult(
+                    novel_id=novel.id,
+                    status="failed",
+                    error=str(e),
+                    slot=slot,
+                )
+            )
 
     agg = AggregateResult.from_results(results)
     logger.info("\n%s", agg)
@@ -843,7 +1046,8 @@ def run_once(
         )
 
         # 7. HMAC 签名 + POST
-        idem_key = new_idempotency_key()
+        # 7-9 fix: 单本模式无 novel.id, 用 "single" + idx 作 stable key
+        idem_key = stable_idempotency_key("single", idx)
         # 2026-07-08 fix: publisher 改推 /api/external/chapters (3-tier Novel + Volume + Chapter)
         # 取代 /api/external/posts (单层 Post, 落 /posts 列表, 架构错位)
         # 同 novel_slug 多次推送 → 同一 Novel + Volume + chapter order 自增
@@ -881,6 +1085,7 @@ def run_once(
                 backup = GithubBackup(
                     repo=config.github_backup_repo,
                     token=config.github_backup_token,
+                    novel_id="single",  # 7-9 fix: run_once 是单本模式 (无 novel 对象), 用 "single" 隔离 (跟 idempotency_key 一致)
                 )
                 post_url = ""
                 if isinstance(resp, dict):

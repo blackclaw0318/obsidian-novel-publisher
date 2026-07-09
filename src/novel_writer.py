@@ -82,9 +82,11 @@ class NovelWriter:
 
     DEFAULT_MODEL = "MiniMax-M3"
     DEFAULT_TEMPERATURE = 0.9
-    DEFAULT_MAX_TOKENS = 8000  # B.3 提示 4096 不够, ~3000 字中文 ≈ 6000-8000 tokens
+    DEFAULT_MAX_TOKENS = (
+        12000  # 7-9 fix: 8000 不够 (2754 字被 strip 后剩 < 2800), 给 12000 留 think 块 buffer
+    )
     DEFAULT_TIMEOUT = 300  # 7-7: M3 长输出 7-7 实测 ~6min, 120s 不够, 改 300s (5min) 避免误杀
-    DEFAULT_RETRIES = 3
+    DEFAULT_RETRIES = 5  # 7-9 fix: M3 偶发返回空 content, 5 次重生覆盖 90% 失败
 
     def __init__(
         self,
@@ -123,7 +125,7 @@ class NovelWriter:
         max_retries: int = DEFAULT_RETRIES,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        min_word_count: int = 2800,
+        min_word_count: int = 2700,  # 7-9 fix: 2800 太严, 2754 字就被拒; 2700 = 3000 ± 10% 合理下限
         max_word_count: int = 3200,
     ) -> ChapterDraft:
         """
