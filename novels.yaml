@@ -46,7 +46,7 @@ novels:
     slug: meta-realm
     description: 一个关于意识、边界与觉醒的科幻故事。
     status: ongoing
-    enabled: false           # 7-8 老板拍: 后续手工删, publisher 不动; 测试期间不写
+    enabled: true           # 7-8 老板拍: 后续手工删, publisher 不动; 测试期间不写
     daily_chapter: true
     target_word_count: 3000
     category: 科幻
@@ -75,7 +75,7 @@ novels:
     slug: glass-sea
     description: 沿海小城, 退潮后海滩上出现的不该存在的东西。
     status: ongoing
-    enabled: false           # 7-8 拍: 大纲待审, 暂不开
+    enabled: true           # 7-8 拍: 大纲待审, 暂不开
     daily_chapter: true
     target_word_count: 3000
     category: 玄幻
