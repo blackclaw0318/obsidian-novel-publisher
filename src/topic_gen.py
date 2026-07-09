@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 
 from .novel_writer import LLMError, NovelWriter, _load_template
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 MAX_KEYWORDS = 10
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 4000
+DEFAULT_RETRIES = 5  # 7-9 fix: M3 偶发 invalid JSON output, 5 次 retry + exp backoff (1+2+4+8=15s)
 
 
 # --------------------------------------------------------------------------
@@ -110,6 +112,7 @@ class TopicGenerator:
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         source: str = "user",
+        max_retries: int = DEFAULT_RETRIES,
     ) -> list[TopicCandidate]:
         """生成 N 个选题候选.
 
@@ -125,20 +128,20 @@ class TopicGenerator:
             N 个 TopicCandidate 列表
 
         Raises:
-            TopicGenError: 关键词 > 10 / M3 失败 / JSON 解析失败
+            TopicGenError: 关键词 > 10 / 模板缺失 / 5 次重试仍失败
         """
-        # 关键词长度校验
+        # 关键词长度校验 (参数错, 不重试)
         if keywords is not None and len(keywords) > MAX_KEYWORDS:
             raise TopicGenError(f"关键词 ≤{MAX_KEYWORDS}, 收到 {len(keywords)}")
 
-        # 1. 加载 prompt 模板
+        # 1. 加载 prompt 模板 (文件错, 不重试)
         try:
             system = _load_template("topic_system.txt")
             user_template = _load_template("topic_user.txt")
         except FileNotFoundError as e:
             raise TopicGenError(f"Topic prompt 模板缺失: {e}") from e
 
-        # 2. 注入 user 模板变量
+        # 2. user 模板变量注入 (KeyError, 不重试)
         try:
             user = user_template.format(
                 keywords=keywords if keywords else "(无 — LLM 自行脑洞科幻题材)",
@@ -148,31 +151,50 @@ class TopicGenerator:
         except KeyError as e:
             raise TopicGenError(f"user prompt 模板变量缺失: {e}") from e
 
-        # 3. 调 M3
-        try:
-            raw = self.writer._call_raw(
-                system=system,
-                user=user,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        except LLMError as e:
-            raise TopicGenError(f"M3 调用失败: {e}") from e
-
-        # 4. 解析 JSON 数组
-        parsed = self._parse_json_array(raw, expected_count=n_candidates)
-
-        # 5. 包装为 TopicCandidate
-        return [
-            TopicCandidate(
-                title=p["title"],
-                outline=p["outline"],
-                keywords_used=list(keywords) if keywords else [],
-                genre_hint=p.get("genre_hint", ""),
-                source=source,
-            )
-            for p in parsed
-        ]
+        # 3-4. M3 调用 + JSON 解析 (失败 retry + exp backoff: 1+2+4+8=15s)
+        # 7-9 加: minimax 偶发返回 incomplete JSON (无 ])、think 残留、漂移到 explanation
+        # 本来失败就直接 exit, 现在 5 次容错覆盖 ~95% 异常场景
+        last_err: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                raw = self.writer._call_raw(
+                    system=system,
+                    user=user,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                parsed = self._parse_json_array(raw, expected_count=n_candidates)
+                # 5. 包装为 TopicCandidate
+                return [
+                    TopicCandidate(
+                        title=p["title"],
+                        outline=p["outline"],
+                        keywords_used=list(keywords) if keywords else [],
+                        genre_hint=p.get("genre_hint", ""),
+                        source=source,
+                    )
+                    for p in parsed
+                ]
+            except (LLMError, TopicGenError) as e:
+                last_err = e
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+                    logger.warning(
+                        "[TopicGen] 第 %d/%d 次失败 (%s: %s), 等 %ds 重试",
+                        attempt + 1,
+                        max_retries,
+                        type(e).__name__,
+                        str(e)[:120],
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                # 最后一次 raise (让上游知失败)
+                if isinstance(e, LLMError):
+                    raise TopicGenError(f"M3 调用失败 {max_retries} 次: {e}") from e
+                raise
+        # unreachable
+        raise TopicGenError(f"unreachable after {max_retries} retries: {last_err}")  # pragma: no cover
 
     @staticmethod
     def _parse_json_array(raw: str, expected_count: int) -> list[dict]:
