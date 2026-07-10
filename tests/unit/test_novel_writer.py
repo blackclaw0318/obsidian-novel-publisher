@@ -1,24 +1,33 @@
 # ============================================================
-# test_novel_writer.py - 单测 v0.2 P6.1
+# test_novel_writer.py - 单测 v0.40 (Anthropic 兼容 + stream + M2.7)
 # ============================================================
 # 覆盖:
 #   - 纯函数: count_chinese_chars / strip_think_block / _load_template
-#   - NovelWriter.__init__ key 校验 / model 默认
-#   - _call_raw: 4xx 立即抛 / 5xx 重试 / 空 content 重试 / 成功路径
-#   - write_chapter: 字数不足重生 / 字数合格一次过 / 网络错重试
-#   - _compose_cover_prompt: 4 类题材检测 + palette/style 注入
+#   - NovelWriter.__init__ key 校验 / model 默认 (M2.7) / base_url 默认 (anthropic)
+#   - _call_anthropic_stream: text block 提取 / thinking block 跳过 / stop_reason
+#   - _call_anthropic_stream: 4xx 立即抛 / 5xx 重试 / 超时重试 / refusal 不可重试
+#   - _call_raw: empty content 重试 / 成功路径 (topic_gen 复用)
+#   - write_chapter: 字数合格一次过 / 字数不足重生 / 0 字硬校验抛 / network error 重试
+#   - _compose_cover_prompt: 4 类题材检测 + palette/style 注入 (v0.6 不变)
 #   - _detect_genre + _style_for_genre: keyword 反推题材
+#
+# 变更: v0.34 → v0.40
+#   - mock target: requests.post → anthropic.Anthropic
+#   - mock response: OpenAI chat.completion → Anthropic Message (content blocks)
+#   - 新增: stop_reason 分类测试 / refusal 不可重试测试 / stream 解析测试
 # ============================================================
 
 from __future__ import annotations
 
-import json
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import anthropic
+import httpx
 import pytest
-import requests
 
 from src.novel_writer import (
+    ContentFilterError,
     LLMError,
     NovelWriter,
     _load_template,
@@ -34,23 +43,75 @@ SAMPLE_THINK_TEXT = "<think>这是思考过程</think>正文开始。" * 1500
 
 @pytest.fixture
 def writer() -> NovelWriter:
-    """用 fake key + mock base_url 构造 NovelWriter"""
-    return NovelWriter(api_key="sk-test-1234", base_url="https://mock.api/v1", model="test-model")
-
-
-def _mock_m3_response(content: str, status: int = 200, usage: dict | None = None) -> MagicMock:
-    """构造 mock requests.Response"""
-    resp = MagicMock()
-    resp.status_code = status
-    resp.json.return_value = {
-        "choices": [{"message": {"content": content}}],
-        "usage": usage or {"prompt_tokens": 100, "completion_tokens": 1000},
-    }
-    resp.text = json.dumps(resp.json.return_value)
-    resp.raise_for_status = MagicMock(
-        side_effect=requests.exceptions.HTTPError(f"{status}") if status >= 400 else None
+    """用 fake key + mock base_url 构造 NovelWriter (不连真 API)"""
+    return NovelWriter(
+        api_key="sk-test-1234",
+        base_url="https://mock.api/anthropic",
+        model="test-model",
     )
-    return resp
+
+
+def _make_text_block(text: str) -> MagicMock:
+    """构造 anthropic TextBlock mock"""
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    return block
+
+
+def _make_thinking_block(text: str = "思考过程...") -> MagicMock:
+    """构造 anthropic ThinkingBlock mock"""
+    block = MagicMock()
+    block.type = "thinking"
+    block.thinking = text
+    return block
+
+
+def _mock_anthropic_message(
+    text: str,
+    stop_reason: str = "end_turn",
+    input_tokens: int = 100,
+    output_tokens: int = 1000,
+    include_thinking: bool = False,
+) -> MagicMock:
+    """构造 anthropic Message mock (含 stop_reason + usage + content blocks)"""
+    content = []
+    if include_thinking:
+        content.append(_make_thinking_block("模型思考中..."))
+    content.append(_make_text_block(text))
+
+    msg = MagicMock()
+    msg.content = content
+    msg.stop_reason = stop_reason
+    msg.usage = MagicMock(input_tokens=input_tokens, output_tokens=output_tokens)
+    return msg
+
+
+def _mock_httpx_request() -> httpx.Request:
+    """构造 mock httpx.Request (anthropic 0.116 APIStatusError 等需要)"""
+    return httpx.Request("POST", "https://api.minimaxi.com/anthropic/v1/messages")
+
+
+def _mock_httpx_response(status_code: int) -> httpx.Response:
+    """构造 mock httpx.Response"""
+    return httpx.Response(status_code, request=_mock_httpx_request())
+
+
+@contextmanager
+def _mock_stream_context(final_msg: MagicMock):
+    """mock anthropic stream context manager
+    用法:
+        with _mock_stream_context(_mock_anthropic_message("OK")) as ctx:
+            # stream.get_final_message() 返 final_msg
+    """
+    stream_cm = MagicMock()
+    stream_cm.get_final_message = MagicMock(return_value=final_msg)
+
+    @contextmanager
+    def _ctx():
+        yield stream_cm
+
+    yield _ctx()
 
 
 # ============ 纯函数 ============
@@ -97,11 +158,19 @@ class TestInit:
         with pytest.raises(ValueError, match="MINIMAXI_API_KEY"):
             NovelWriter()
 
-    def test_default_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_model_m27(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """v0.40: 默认 model = MiniMax-M2.7 (不再 M3)"""
         monkeypatch.setenv("MINIMAXI_API_KEY", "sk-test")
         monkeypatch.delenv("MINIMAXI_TEXT_MODEL", raising=False)
         w = NovelWriter()
-        assert w.model == "MiniMax-M3"
+        assert w.model == "MiniMax-M2.7"
+
+    def test_default_base_url_anthropic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """v0.40: 默认 base_url = anthropic 兼容端点"""
+        monkeypatch.setenv("MINIMAXI_API_KEY", "sk-test")
+        monkeypatch.delenv("MINIMAXI_BASE_URL", raising=False)
+        w = NovelWriter()
+        assert w.base_url == "https://api.minimaxi.com/anthropic"
 
     def test_repr_no_key_leak(self) -> None:
         w = NovelWriter(api_key="sk-very-secret-key", base_url="https://x")
@@ -111,71 +180,192 @@ class TestInit:
         assert "-key" in r  # suffix (last 4 chars)
 
 
-# ============ _call_raw ============
-class TestCallRaw:
-    def test_4xx_immediate_raise_no_retry(self, writer: NovelWriter) -> None:
-        """4xx 参数错 → 立即抛 LLMError, 不重试"""
-        resp_400 = _mock_m3_response("", status=400)
-        resp_400.raise_for_status = MagicMock()  # raise_for_status 自己处理 4xx
-        resp_400.json = MagicMock(side_effect=ValueError("not json"))
+# ============ _call_anthropic_stream ============
+class TestCallAnthropicStream:
+    def test_text_only_success(self, writer: NovelWriter) -> None:
+        """text 块 → 直接返回"""
+        msg = _mock_anthropic_message("正常内容")
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=MagicMock(get_final_message=MagicMock(return_value=msg)))
+        ctx.__exit__ = MagicMock(return_value=False)
 
-        with patch("src.novel_writer.requests.post", return_value=resp_400) as mock_post:
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            text, stop_reason, usage, duration_s = writer._call_anthropic_stream(
+                system="s", user="u", temperature=0.9, max_tokens=8000
+            )
+        assert text == "正常内容"
+        assert stop_reason == "end_turn"
+        assert usage["input_tokens"] == 100
+        assert usage["output_tokens"] == 1000
+        assert duration_s > 0
+
+    def test_thinking_block_skipped(self, writer: NovelWriter) -> None:
+        """thinking 块 → 跳过, 只返回 text"""
+        msg = _mock_anthropic_message("正文内容", include_thinking=True)
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=MagicMock(get_final_message=MagicMock(return_value=msg)))
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            text, _, _, _ = writer._call_anthropic_stream(
+                system="s", user="u", temperature=0.9, max_tokens=8000
+            )
+        assert text == "正文内容"
+        assert "思考" not in text
+
+    def test_refusal_raises_content_filter(self, writer: NovelWriter) -> None:
+        """stop_reason='refusal' → ContentFilterError 不可重试"""
+        msg = _mock_anthropic_message("敏感内容", stop_reason="refusal")
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=MagicMock(get_final_message=MagicMock(return_value=msg)))
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            with pytest.raises(ContentFilterError, match="内容审查"):
+                writer._call_anthropic_stream(
+                    system="s", user="u", temperature=0.9, max_tokens=8000
+                )
+
+    def test_max_tokens_stop_reason(self, writer: NovelWriter) -> None:
+        """stop_reason='max_tokens' → 正常返回, 不抛 (上层 write_chapter 字数校验会处理)"""
+        msg = _mock_anthropic_message("部分内容被截断", stop_reason="max_tokens")
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=MagicMock(get_final_message=MagicMock(return_value=msg)))
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            text, stop_reason, _, _ = writer._call_anthropic_stream(
+                system="s", user="u", temperature=0.9, max_tokens=8000
+            )
+        assert text == "部分内容被截断"
+        assert stop_reason == "max_tokens"
+
+    def test_4xx_raises_immediately(self, writer: NovelWriter) -> None:
+        """4xx → LLMError 立即抛, 不重试 (上层 write_chapter 也不重试)"""
+        error = anthropic.APIStatusError(
+            message="bad request",
+            response=_mock_httpx_response(400),
+            body={"error": "invalid model"},
+        )
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(side_effect=error)
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
             with pytest.raises(LLMError, match="4xx"):
-                writer._call_raw(system="s", user="u", max_retries=3)
-            # 关键: 只调 1 次, 不重试
-            assert mock_post.call_count == 1
+                writer._call_anthropic_stream(
+                    system="s", user="u", temperature=0.9, max_tokens=8000
+                )
 
-    def test_5xx_retry_then_succeed(self, writer: NovelWriter) -> None:
-        """5xx → 重试 → 第 2 次 200 成功"""
-        resp_500 = _mock_m3_response("", status=500)
-        resp_500.raise_for_status = MagicMock(side_effect=requests.exceptions.HTTPError("500"))
-        resp_500.json = MagicMock(side_effect=ValueError("server error"))
+    def test_5xx_raises_for_retry(self, writer: NovelWriter) -> None:
+        """5xx → LLMError, 上层 write_chapter 会 retry"""
+        error = anthropic.APIStatusError(
+            message="server error",
+            response=_mock_httpx_response(500),
+            body={"error": "internal"},
+        )
 
-        resp_200 = _mock_m3_response("OK content")
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(side_effect=error)
+        ctx.__exit__ = MagicMock(return_value=False)
 
-        with patch("src.novel_writer.requests.post", side_effect=[resp_500, resp_200]) as mock_post:
-            with patch("src.novel_writer.time.sleep"):  # 跳过 sleep 加速
-                content = writer._call_raw(system="s", user="u", max_retries=3)
-            assert content == "OK content"
-            assert mock_post.call_count == 2
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            with pytest.raises(LLMError, match="5xx"):
+                writer._call_anthropic_stream(
+                    system="s", user="u", temperature=0.9, max_tokens=8000
+                )
 
-    def test_5xx_retry_exhausted(self, writer: NovelWriter) -> None:
-        """5xx 一直失败 → 重试耗尽抛 LLMError"""
-        resp_500 = _mock_m3_response("", status=500)
-        resp_500.raise_for_status = MagicMock(side_effect=requests.exceptions.HTTPError("500"))
+    def test_connection_error_raises(self, writer: NovelWriter) -> None:
+        """APIConnectionError → LLMError"""
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(
+            side_effect=anthropic.APIConnectionError(request=_mock_httpx_request())
+        )
+        ctx.__exit__ = MagicMock(return_value=False)
 
-        with patch("src.novel_writer.requests.post", return_value=resp_500):
-            with patch("src.novel_writer.time.sleep"):
-                with pytest.raises(LLMError, match="M3 调用失败"):
-                    writer._call_raw(system="s", user="u", max_retries=2)
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            with pytest.raises(LLMError, match="连接错"):
+                writer._call_anthropic_stream(
+                    system="s", user="u", temperature=0.9, max_tokens=8000
+                )
+
+    def test_timeout_raises(self, writer: NovelWriter) -> None:
+        """APITimeoutError → LLMError"""
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(side_effect=anthropic.APITimeoutError("timeout"))
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            with pytest.raises(LLMError, match="timeout"):
+                writer._call_anthropic_stream(
+                    system="s", user="u", temperature=0.9, max_tokens=8000
+                )
+
+
+# ============ _call_raw (通用接口, topic_gen 复用) ============
+class TestCallRaw:
+    def test_happy_path(self, writer: NovelWriter) -> None:
+        """正常 text → 返回"""
+        msg = _mock_anthropic_message("选题 JSON 输出")
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=MagicMock(get_final_message=MagicMock(return_value=msg)))
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            content = writer._call_raw(system="s", user="u", max_retries=3)
+        assert content == "选题 JSON 输出"
 
     def test_empty_content_retry(self, writer: NovelWriter) -> None:
-        """200 但 content 空 → 重试"""
-        resp_empty = _mock_m3_response("   ")  # 全空白
-        resp_ok = _mock_m3_response("正常内容")
+        """200 但 content 空 → 重试 → 第 2 次成功"""
+        msg_empty = _mock_anthropic_message("   ")  # 全空白 text
+        msg_ok = _mock_anthropic_message("正常内容")
 
-        with patch("src.novel_writer.requests.post", side_effect=[resp_empty, resp_ok]):
+        ctx_empty = MagicMock()
+        ctx_empty.__enter__ = MagicMock(
+            return_value=MagicMock(get_final_message=MagicMock(return_value=msg_empty))
+        )
+        ctx_empty.__exit__ = MagicMock(return_value=False)
+
+        ctx_ok = MagicMock()
+        ctx_ok.__enter__ = MagicMock(
+            return_value=MagicMock(get_final_message=MagicMock(return_value=msg_ok))
+        )
+        ctx_ok.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(
+            writer._client.messages, "stream", side_effect=[ctx_empty, ctx_ok]
+        ):
             with patch("src.novel_writer.time.sleep"):
                 content = writer._call_raw(system="s", user="u", max_retries=3)
-            assert content == "正常内容"
+        assert content == "正常内容"
 
-    def test_response_format_error(self, writer: NovelWriter) -> None:
-        """响应缺 choices 字段 → LLMError"""
-        resp_bad = MagicMock()
-        resp_bad.status_code = 200
-        resp_bad.json.return_value = {"error": "format"}
-        resp_bad.raise_for_status = MagicMock()
+    def test_4xx_raises_immediately(self, writer: NovelWriter) -> None:
+        """4xx → 立即抛"""
+        error = anthropic.APIStatusError(
+            message="bad", response=_mock_httpx_response(400), body={}
+        )
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(side_effect=error)
+        ctx.__exit__ = MagicMock(return_value=False)
 
-        with patch("src.novel_writer.requests.post", return_value=resp_bad):
-            with pytest.raises(LLMError, match="响应格式异常"):
-                writer._call_raw(system="s", user="u", max_retries=1)
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            with pytest.raises(LLMError, match="4xx"):
+                writer._call_raw(system="s", user="u", max_retries=3)
 
 
 # ============ write_chapter ============
 class TestWriteChapter:
     def test_happy_path(self, writer: NovelWriter) -> None:
         """字数合格 → 一次成功"""
-        with patch.object(writer, "_call_raw", return_value=SAMPLE_CHAPTER_TEXT):
+        msg = _mock_anthropic_message(SAMPLE_CHAPTER_TEXT)
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(
+            return_value=MagicMock(get_final_message=MagicMock(return_value=msg))
+        )
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
             draft = writer.write_chapter(
                 chapter_idx=1,
                 truth_snapshot={"chapter_title": "测试章", "chapter_goal": "目标"},
@@ -184,11 +374,30 @@ class TestWriteChapter:
         assert draft.word_count > 2800
         assert draft.raw_text == SAMPLE_CHAPTER_TEXT
         assert draft.cover_prompt  # 非空
+        assert draft.stop_reason == "end_turn"
+        assert draft.duration_s > 0
 
     def test_short_word_count_retry(self, writer: NovelWriter) -> None:
         """字数不足 → 重生 → 第 2 次长文本"""
+        msg_short = _mock_anthropic_message(SAMPLE_SHORT_TEXT)
+        msg_long = _mock_anthropic_message(SAMPLE_CHAPTER_TEXT)
+
+        ctx_short = MagicMock()
+        ctx_short.__enter__ = MagicMock(
+            return_value=MagicMock(get_final_message=MagicMock(return_value=msg_short))
+        )
+        ctx_short.__exit__ = MagicMock(return_value=False)
+
+        ctx_long = MagicMock()
+        ctx_long.__enter__ = MagicMock(
+            return_value=MagicMock(get_final_message=MagicMock(return_value=msg_long))
+        )
+        ctx_long.__exit__ = MagicMock(return_value=False)
+
         with (
-            patch.object(writer, "_call_raw", side_effect=[SAMPLE_SHORT_TEXT, SAMPLE_CHAPTER_TEXT]),
+            patch.object(
+                writer._client.messages, "stream", side_effect=[ctx_short, ctx_long]
+            ),
             patch("src.novel_writer.time.sleep"),
         ):
             draft = writer.write_chapter(
@@ -198,19 +407,62 @@ class TestWriteChapter:
             )
         assert draft.word_count > 2800
 
-    def test_llm_error_after_retries(self, writer: NovelWriter) -> None:
-        """LLM 一直失败 → 最终 LLMError"""
-        with patch.object(writer, "_call_raw", side_effect=LLMError("fail")):
+    def test_empty_content_raises(self, writer: NovelWriter) -> None:
+        """v0.40 新增: 0 字硬校验 → LLMError 立即抛, 不再进 renderer"""
+        msg_empty = _mock_anthropic_message("")  # 真正空
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(
+            return_value=MagicMock(get_final_message=MagicMock(return_value=msg_empty))
+        )
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
             with patch("src.novel_writer.time.sleep"):
-                with pytest.raises(LLMError):
+                with pytest.raises(LLMError, match="empty content"):
                     writer.write_chapter(
                         chapter_idx=3,
                         truth_snapshot={"chapter_title": "x", "chapter_goal": "y"},
                         style_guide={},
                     )
 
+    def test_llm_error_after_retries(self, writer: NovelWriter) -> None:
+        """LLM 一直失败 → 最终 LLMError"""
+        error = anthropic.APIStatusError(
+            message="server fail", response=_mock_httpx_response(500), body={}
+        )
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(side_effect=error)
+        ctx.__exit__ = MagicMock(return_value=False)
 
-# ============ _compose_cover_prompt ============
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            with patch("src.novel_writer.time.sleep"):
+                with pytest.raises(LLMError):
+                    writer.write_chapter(
+                        chapter_idx=4,
+                        truth_snapshot={"chapter_title": "x", "chapter_goal": "y"},
+                        style_guide={},
+                    )
+
+    def test_refusal_propagates_without_retry(self, writer: NovelWriter) -> None:
+        """ContentFilterError → 不可重试, 立即抛"""
+        msg = _mock_anthropic_message("敏感内容", stop_reason="refusal")
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(
+            return_value=MagicMock(get_final_message=MagicMock(return_value=msg))
+        )
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(writer._client.messages, "stream", return_value=ctx):
+            with pytest.raises(ContentFilterError):
+                writer.write_chapter(
+                    chapter_idx=5,
+                    truth_snapshot={"chapter_title": "x", "chapter_goal": "y"},
+                    style_guide={},
+                )
+
+
+# ============ _compose_cover_prompt (v0.6 不变) ============
 class TestCoverPrompt:
     def test_scifi_genre_detection(self, writer: NovelWriter) -> None:
         """科幻关键词 → cyberpunk / neon 风格"""

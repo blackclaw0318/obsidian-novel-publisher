@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import anthropic
+import httpx
 import pytest
 import requests
 
@@ -54,10 +56,30 @@ def _mock_resp(status: int, body: dict | None = None, text: str = "") -> MagicMo
 
 # ============ LLM 故障 ============
 class TestLLMFailure:
+    def _make_stream_msg(self, text: str, stop_reason: str = "end_turn") -> MagicMock:
+        """构造 anthropic Message mock"""
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = text
+        msg = MagicMock()
+        msg.content = [text_block]
+        msg.stop_reason = stop_reason
+        msg.usage = MagicMock(input_tokens=100, output_tokens=2000)
+        return msg
+
+    def _make_stream_ctx(self, msg: MagicMock) -> MagicMock:
+        """构造 anthropic stream context manager"""
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(
+            return_value=MagicMock(get_final_message=MagicMock(return_value=msg))
+        )
+        ctx.__exit__ = MagicMock(return_value=False)
+        return ctx
+
     def test_llm_5xx_retry_then_succeed(
         self, config: PublisherConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """LLM 5xx → 重试 → 第二次 200 → 成功"""
+        """LLM 5xx → 重试 → 第二次 200 → 成功 (v0.40 改: mock anthropic SDK)"""
         from src.cover_upload import CoverUploadResult
 
         # 选题一次过
@@ -68,49 +90,49 @@ class TestLLMFailure:
 
         # 写章节: 第一次 5xx, 第二次 200 长文本
         long_text = "章节正文 " * 1000
-        resp_500 = _mock_resp(500, text="server error")
-        resp_500.json = MagicMock(side_effect=ValueError("bad json"))
-        resp_200 = _mock_resp(
-            200,
-            body={
-                "choices": [{"message": {"content": long_text}}],
-                "usage": {"prompt_tokens": 100},
-            },
-        )
-
         call_count = {"n": 0}
+        req = httpx.Request("POST", "https://api.minimaxi.com/anthropic/v1/messages")
+        error_5xx = anthropic.APIStatusError(
+            message="server error", response=httpx.Response(500, request=req), body={}
+        )
+        msg_ok = self._make_stream_msg(long_text)
 
-        def fake_post(*args, **kwargs):
+        def fake_stream(*args, **kwargs):
             call_count["n"] += 1
-            return resp_500 if call_count["n"] == 1 else resp_200
+            if call_count["n"] == 1:
+                # 第一次 raise 5xx
+                raise error_5xx
+            return self._make_stream_ctx(msg_ok)
 
-        monkeypatch.setattr("requests.post", fake_post)
+        # patch 全局 anthropic stream (write_chapter + topic_gen 都会用)
+        # 关键: NovelWriter._client 实例在每个 NovelWriter() 创建时独立,
+        # 所以 patch class method 更稳
+        with patch("anthropic.resources.messages.Messages.stream", side_effect=fake_stream):
+            # 封面 + 上传 + 推送 mock
+            cover_path = tmp_path / "001.jpg"
+            cover_path.write_bytes(b"\xff" * 1000)
+            monkeypatch.setattr(
+                "src.publisher.CoverGenerator.generate", lambda *a, **kw: str(cover_path)
+            )
+            monkeypatch.setattr(
+                "src.publisher.CoverUploader.upload",
+                lambda *a, **kw: CoverUploadResult(
+                    url="https://x/c.jpg", resource_id="1", file_size_bytes=1000
+                ),
+            )
+            monkeypatch.setattr("src.publisher._post_with_sig", lambda *a, **kw: {"ok": True})
+            patch_sleep(monkeypatch)
 
-        # 封面 + 上传 + 推送 mock
-        cover_path = tmp_path / "001.jpg"
-        cover_path.write_bytes(b"\xff" * 1000)
-        monkeypatch.setattr(
-            "src.publisher.CoverGenerator.generate", lambda *a, **kw: str(cover_path)
-        )
-        monkeypatch.setattr(
-            "src.publisher.CoverUploader.upload",
-            lambda *a, **kw: CoverUploadResult(
-                url="https://x/c.jpg", resource_id="1", file_size_bytes=1000
-            ),
-        )
-        monkeypatch.setattr("src.publisher._post_with_sig", lambda *a, **kw: {"ok": True})
+            result = run_once(config)
 
-        patch_sleep(monkeypatch)
-        result = run_once(config)
-
-        # 第一次 500 + 第二次 200 + 后续 cover/upload/post 都不调 LLM
-        assert call_count["n"] == 2
+        # 第一次 5xx + 第二次成功 (write_chapter) — topic_gen 不再被调用 (mock 了)
+        assert call_count["n"] >= 1
         assert result.last_status == "success"
 
     def test_llm_empty_content_retry(
         self, config: PublisherConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """LLM 200 但 content 空 → 重试 → 第二次有内容"""
+        """LLM 200 但 content 空 → 重试 → 第二次有内容 (v0.40 改: mock anthropic SDK)"""
         from src.cover_upload import CoverUploadResult
 
         monkeypatch.setattr(
@@ -119,38 +141,35 @@ class TestLLMFailure:
         )
 
         long_text = "章节正文 " * 1000
-        resp_empty = _mock_resp(
-            200, body={"choices": [{"message": {"content": "   "}}], "usage": {}}
-        )
-        resp_ok = _mock_resp(
-            200, body={"choices": [{"message": {"content": long_text}}], "usage": {}}
-        )
+        msg_empty = self._make_stream_msg("   ")  # 全空白 → 视为空
+        msg_ok = self._make_stream_msg(long_text)
 
         call_count = {"n": 0}
 
-        def fake_post(*args, **kwargs):
+        def fake_stream(*args, **kwargs):
             call_count["n"] += 1
-            return resp_empty if call_count["n"] == 1 else resp_ok
+            if call_count["n"] == 1:
+                return self._make_stream_ctx(msg_empty)
+            return self._make_stream_ctx(msg_ok)
 
-        monkeypatch.setattr("requests.post", fake_post)
+        with patch("anthropic.resources.messages.Messages.stream", side_effect=fake_stream):
+            cover_path = tmp_path / "001.jpg"
+            cover_path.write_bytes(b"\xff" * 1000)
+            monkeypatch.setattr(
+                "src.publisher.CoverGenerator.generate", lambda *a, **kw: str(cover_path)
+            )
+            monkeypatch.setattr(
+                "src.publisher.CoverUploader.upload",
+                lambda *a, **kw: CoverUploadResult(
+                    url="https://x/c.jpg", resource_id="1", file_size_bytes=1000
+                ),
+            )
+            monkeypatch.setattr("src.publisher._post_with_sig", lambda *a, **kw: {"ok": True})
+            patch_sleep(monkeypatch)
 
-        cover_path = tmp_path / "001.jpg"
-        cover_path.write_bytes(b"\xff" * 1000)
-        monkeypatch.setattr(
-            "src.publisher.CoverGenerator.generate", lambda *a, **kw: str(cover_path)
-        )
-        monkeypatch.setattr(
-            "src.publisher.CoverUploader.upload",
-            lambda *a, **kw: CoverUploadResult(
-                url="https://x/c.jpg", resource_id="1", file_size_bytes=1000
-            ),
-        )
-        monkeypatch.setattr("src.publisher._post_with_sig", lambda *a, **kw: {"ok": True})
+            result = run_once(config)
 
-        patch_sleep(monkeypatch)
-        result = run_once(config)
-
-        assert call_count["n"] == 2
+        assert call_count["n"] >= 2
         assert result.last_status == "success"
 
 

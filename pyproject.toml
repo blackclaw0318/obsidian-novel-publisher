@@ -32,6 +32,8 @@ dependencies = [
     "python-dotenv>=1.0.0",       # .env 加载
     "pydantic>=2.5.0",            # 状态/配置模型 (类型安全)
     "Pillow>=10.0.0",             # cover_gen 封面图校验 (PIL.Image.verify) — 7-7 修复: 缺此 dep 触发"size < 50000" 误杀
+    "anthropic>=0.40.0",          # 7-10 v0.40: 切 Anthropic 兼容协议 + stream (B+C 方案)
+    "httpx>=0.25.0",              # anthropic SDK 间接依赖, 显式声明便于 lock
 ]
 
 # ============================================================

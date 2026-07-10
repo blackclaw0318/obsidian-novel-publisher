@@ -49,6 +49,9 @@ class CoverGenerator:
     MIN_SIZE_BYTES = 50_000  # 50KB, 小于此视为无效图
     MAX_RETRIES = 3
     RETRY_DELAY = 2.0  # 秒
+    # 7-10: image API 仍走 OpenAI 兼容 /v1, 跟 text API (anthropic 兼容) 分开
+    # 不能用 MINIMAXI_BASE_URL (text 端点), 否则 text=anthropic 串到 image
+    DEFAULT_BASE_URL = "https://api.minimaxi.com/v1"
 
     def __init__(
         self,
@@ -58,8 +61,10 @@ class CoverGenerator:
         output_dir: str | None = None,
     ):
         self.api_key = api_key or os.environ.get("MINIMAXI_API_KEY")
+        # 7-10: 显式走 image OpenAI 兼容端点, 不读 MINIMAXI_BASE_URL (那是 text 端点)
         self.base_url = (
-            base_url or os.environ.get("MINIMAXI_BASE_URL", "https://api.minimaxi.com/v1")
+            base_url
+            or os.environ.get("MINIMAXI_IMAGE_BASE_URL", self.DEFAULT_BASE_URL)
         ).rstrip("/")
         self.model = model or os.environ.get("MINIMAXI_IMAGE_MODEL", "image-01")
         self.output_dir = pathlib.Path(output_dir or os.environ.get("OUTPUT_DIR", "data/covers"))
