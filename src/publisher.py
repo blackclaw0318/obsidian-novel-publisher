@@ -77,8 +77,24 @@ from .style_guide import StyleGuide as StyleGuideParsed
 from .style_guide import fetch_style_guide
 from .text_punct import _merge_orphan_quotes, normalize_cn_punctuation
 from .topic_gen import generate_one_shot
+from .wechat_notifier import (
+    WechatNotifierConfig,
+)
+from .wechat_notifier import (
+    notify_failure as _notify_wechat_failure,
+)
+from .wechat_notifier import (
+    notify_success as _notify_wechat_success,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------
+# 微信通知配置 (v0.40 P1, 模块级 lazy load)
+# --------------------------------------------------------------------------
+
+_wechat_cfg: WechatNotifierConfig = WechatNotifierConfig.from_env()
 
 
 def stable_idempotency_key(novel_id: str, chapter_idx: int) -> str:
@@ -451,8 +467,7 @@ def _run_one_novel(
     slot = _current_slot(_now_utc(), schedule)
 
     idx = state.next_idx
-
-    # 1. 拉 outline / style_guide / characters (P1 集成)
+    topic = None  # 提前初始化, except 块访问安全 (v0.40 P1 notifier 需要)
     outline_text = ""
     style_guide_dict: dict = {}
     characters_dict: dict = {}
@@ -759,15 +774,51 @@ def _run_one_novel(
             slot,
             cover_url[:60] if cover_url else "(无)",
         )
+
+        # 10. 微信审查通知 (v0.40 P1: 推送成功 → 老板微信)
+        # 失败也不影响 publisher 主流程 (内部 try/except 全包)
+        try:
+            _notify_wechat_success(
+                _wechat_cfg,
+                novel_id=novel.id,
+                chapter_idx=idx,
+                title=topic.title,
+                word_count=draft.word_count,
+                cover_url=cover_url,
+                post_url=post_url,
+            )
+        except Exception as e:  # pragma: no cover — defensive, notifier 内部已 try
+            logger.warning("[%s/%d] 微信通知失败 (无害): %s", novel.id, idx, e)
         return state
 
     except LLMError as e:
         state.mark_failed(idx, f"LLM error: {e}")
         save_state_for_novel(state, novel.id)
+        # 微信告警 (v0.40 P1, 内部 try/except 隔离)
+        try:  # noqa: SIM105
+            _notify_wechat_failure(
+                _wechat_cfg,
+                novel_id=novel.id,
+                chapter_idx=idx,
+                title=topic.title if topic else "",
+                error_short=f"LLM 调用失败: {type(e).__name__}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         raise ChapterGenError(f"[{novel.id}/{idx}] LLM 调用失败: {e}") from e
     except CoverUploadError as e:
         state.mark_failed(idx, f"cover upload error: {e}")
         save_state_for_novel(state, novel.id)
+        try:  # noqa: SIM105
+            _notify_wechat_failure(
+                _wechat_cfg,
+                novel_id=novel.id,
+                chapter_idx=idx,
+                title=topic.title if topic else "",
+                error_short=f"封面上传失败: {type(e).__name__}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         raise CoverGenError(f"[{novel.id}/{idx}] 封面上传失败: {e}") from e
     except RunTimeoutError as e:
         state.mark_failed(idx, f"hard timeout: {e}")
@@ -779,10 +830,30 @@ def _run_one_novel(
             hard_timeout_s,
             e,
         )
+        try:  # noqa: SIM105
+            _notify_wechat_failure(
+                _wechat_cfg,
+                novel_id=novel.id,
+                chapter_idx=idx,
+                title=topic.title if topic else "",
+                error_short=f"硬超时 ({hard_timeout_s:.0f}s)",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         raise
     except Exception as e:
         state.mark_failed(idx, f"unexpected: {type(e).__name__}: {e}")
         save_state_for_novel(state, novel.id)
+        try:  # noqa: SIM105
+            _notify_wechat_failure(
+                _wechat_cfg,
+                novel_id=novel.id,
+                chapter_idx=idx,
+                title=topic.title if topic else "",
+                error_short=f"未预期: {type(e).__name__}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         raise PublisherError(f"[{novel.id}/{idx}] 未预期错误: {e}") from e
     finally:
         _cancel_hard_timeout(_old_alarm)
