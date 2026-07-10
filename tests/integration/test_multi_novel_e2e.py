@@ -369,9 +369,9 @@ def test_quota_check_per_novel_isolated(isolated, config, monkeypatch: pytest.Mo
     assert state_b.next_idx == 2
     assert state_b.last_status == "success"
 
-    # a state: mark_skipped 推进 next_idx (skip_next 消耗一次, slot_already_pushed 也走这逻辑)
+    # a state: mark_skipped 不推进 next_idx (v0.41 fix, 跟 mark_failed 一致)
     state_a = load_state_for_novel("a_obsidian", auto_migrate=False)
-    assert state_a.next_idx == 3
+    assert state_a.next_idx == 2  # v0.41 fix: 不推进,下次仍从 idx=2 起
     assert state_a.last_status == "skipped"
     assert "slot_already_pushed" in (state_a.last_error or "")
 

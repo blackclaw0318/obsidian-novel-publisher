@@ -25,7 +25,12 @@ novels:
         title: "第一卷: 异常合成"
         description: 31 天里, 一个化学博士从理性走向炼体, 最后拒绝秩序。
         start_chapter: 1
-        end_chapter: 5         # 短篇, 5 章收尾 (满 5 自动通知开新卷, 本卷到 ch5 即完结)
+        end_chapter: 5         # v0.2 起 (2026-07-10): ch5 已推完, 第二卷手工加; publisher 仍无自动开卷逻辑, 下一卷需手动补
+      - order: 2
+        title: "第二卷: 碳笼飞升"
+        description: C₉₉ 簇改写细胞之后, 从练气到大乘, 化学博士以碳笼为基重构修仙体系。
+        start_chapter: 6
+        end_chapter: 10
     # ============ chapter slug 规范 (新推章节) ============
     chapter_slug_template: "{novel_slug}-ch{idx:03d}"
     # ============ backups 仓路径 (相对 backups 仓根) ============

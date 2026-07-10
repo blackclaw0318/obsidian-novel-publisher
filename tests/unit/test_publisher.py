@@ -79,13 +79,13 @@ class TestConfig:
 # ============ run_once 跳过 ============
 class TestRunOnceSkipped:
     def test_skip_next_marks_skipped(self, config: PublisherConfig) -> None:
-        """state.skip_next=True → run_once 跳过 + 不推进 next_idx"""
+        """state.skip_next=True → run_once 跳过 + 不推进 next_idx (v0.41 fix)"""
         state = PublishState(skip_next=True, next_idx=3)
         save_state(state, config.state_path)
 
         result = run_once(config)
         assert result.last_status == "skipped"
-        assert result.next_idx == 4  # 跳过的也算"消耗"了这次 (mark_skipped idx+1)
+        assert result.next_idx == 3  # v0.41 fix: 不推进 (跟 mark_failed 一致)
 
     def test_force_bypasses_skip(self, config: PublisherConfig) -> None:
         """force=True → 跳过 skip_next 标记"""

@@ -108,10 +108,15 @@ class PublishState:
         # 失败不推进, 不清 skip_next (老板可能想跳过这章)
 
     def mark_skipped(self, idx: int, reason: str = "skip_next") -> None:
-        """跳过本次 (老板手动设了 skip_next)"""
+        """跳过本次 (老板手动设了 skip_next 或 slot_already_pushed)
+
+        v0.41 fix (2026-07-10, 黑): 跟 mark_failed 一致 — 跳过不推进 next_idx。
+        原代码 self.next_idx = idx + 1 导致 slot_already_pushed skip 时偷偷跳号
+        (已实锤: ch7 被 skip 后 next_idx 7→8, 下次跑推 ch8 跳过 ch7 永久失踪)。
+        """
         self.last_status = "skipped"
         self.last_error = reason
-        self.next_idx = idx + 1  # 跳过的也算"消耗"了这次
+        # 不推进 next_idx: 下次 run 仍从同一 idx 起 (跟 mark_failed 同语义)
         if self.skip_next:
             self.skip_next = False
 

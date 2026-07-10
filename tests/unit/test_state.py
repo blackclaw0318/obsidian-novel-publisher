@@ -58,10 +58,11 @@ class TestPublishStateTransitions:
         assert state.last_error is not None
         assert len(state.last_error) <= 500
 
-    def test_mark_skipped_advances_next_idx(self):
+    def test_mark_skipped_keeps_next_idx(self):
+        """v0.41 fix: mark_skipped 不推进 next_idx (跟 mark_failed 一致)"""
         state = PublishState(next_idx=7, skip_next=True)
         state.mark_skipped(idx=7, reason="skip_next")
-        assert state.next_idx == 8  # 跳过的也算消耗
+        assert state.next_idx == 7  # 不推进,下次跑仍从 7 起
         assert state.last_status == "skipped"
         assert state.skip_next is False  # 自动清
 
